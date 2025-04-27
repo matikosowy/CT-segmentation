@@ -16,7 +16,74 @@ from sklearn.model_selection import train_test_split
 import tqdm
 from monai.utils import first
 
-def get_labels(input_dir, output_dir, roi_subset=None):
+from torch.utils.data import Dataset
+
+import torch
+
+class Kidneys2dDataset(Dataset):
+    def __init__(self, root_dir, transform=None, combine_kidneys=True):
+        self.samples = []
+        self.transform = transform
+        self.combine_kidneys = combine_kidneys
+        
+        patient_dirs = sorted([d for d in Path(root_dir).iterdir() if d.is_dir()])
+        
+        for patient_dir in patient_dirs:
+            patient_path = Path(patient_dir)
+            ct_path = patient_path / "ct.nii.gz"
+            left_path = patient_path / "kidney_left.nii.gz"
+            right_path = patient_path / "kidney_right.nii.gz"
+            
+            if not ct_path.exists() or not left_path.exists() or not right_path.exists():
+                print(f"Missing files for {patient_dir}, skipping.")
+                continue
+        
+            ct_volume = nib.load(ct_path).get_fdata()
+            left_volume = nib.load(left_path).get_fdata()
+            right_volume = nib.load(right_path).get_fdata()
+            
+            assert ct_volume.shape == left_volume.shape == right_volume.shape, "CT and mask volumes must have the same shape."
+            
+            depth = ct_volume.shape[2]
+            
+            for idx in range(depth):
+                left_slice = left_volume[:, :, idx]
+                right_slice = right_volume[:, :, idx]
+                
+                if np.sum(left_slice) == 0 and np.sum(right_slice) == 0:
+                    continue # Skip empty slices
+                
+                self.samples.append({
+                    'ct_slice': ct_volume[:, :, idx],
+                    'left_mask': left_slice,
+                    'right_mask': right_slice,
+                })
+            
+        def __len__(self):
+            return len(self.samples)
+        
+        def __getitem__(self, idx):
+            sample = self.samples[idx]
+            
+            image = sample['ct_slice']
+            left = sample['left_mask']
+            right = sample['right_mask']
+            
+            if self.combine_kidneys:
+                mask = np.clip(left + right, 0, 1)[None, ...]
+            else:
+                mask = np.stack([left, right], axis=0)
+            
+            if self.transform:
+                data = {'image': image, 'label': mask}
+                data = self.transform(data)
+                image = torch.tensor(data['image'], dtype=torch.float32)
+                mask = torch.tensor(data['label'], dtype=torch.float32)
+
+            return image, mask
+        
+
+def get_totalsegmentator_labels(input_dir, output_dir, roi_subset=None):
     """
     Generate segmentation masks for NIfTI files in the specified directory.
     Uses the TotalSegmentator library to perform the segmentation.
