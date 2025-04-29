@@ -1,445 +1,325 @@
-"""
-Data Module (data.py)
--------------------
-This module handles the data preparation and segmentation mask generation for the CT segmentation task.
-
-It includes the following functionalities:
-1. **get_segmentation_masks**: This function generates segmentation masks for NIfTI files in the specified directory using the TotalSegmentator library.
-2. **prepare_data**: This function prepares the data for training by applying various transformations and creating a DataLoader.
-"""
-
-from totalsegmentator.python_api import totalsegmentator
-from monai.transforms import *
-from monai.data import Dataset, DataLoader, list_data_collate
+import numpy as np
+import nibabel as nib
 from pathlib import Path
-from sklearn.model_selection import train_test_split
-import tqdm
-from monai.utils import first
-
-from torch.utils.data import Dataset
-
 import torch
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.sampler import WeightedRandomSampler
+import albumentations as A
+from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+import warnings
+
 
 class Kidneys2dDataset(Dataset):
-    def __init__(self, root_dir, transform=None, combine_kidneys=True):
-        self.samples = []
+    """
+    2D Kidney CT slices Dataset with caching
+    
+    Args:
+        root_dir (str or Path): Patients root directory
+        transform (callable, optional): Transfomations to perform on the data
+        combine_kidneys (bool): Whether to combine both kidney masks into one
+        filter_empty (bool): Whether to skip empty kidney masks patients
+        kidney_files (list): Kidney files names list, e.g. kidney_left.nii.gz
+        window_width (int): CT HU window width
+        window_center (int): CT HU window center
+        min_kidney_pixels (int): Minimal kidney mask pixel count
+        cache_dir (str or Path, optional): Cache dir path
+        use_cache (bool): Whether to use caching
+        val_ratio (float): Validation set percentage ratio
+        test_ratio (float): Test set percentage ratio
+        split (str): Which subset: train, val, test
+        seed (int): Random seed
+    """
+    def __init__(self, 
+                 root_dir, 
+                 transform=None, 
+                 combine_kidneys=True,
+                 filter_empty=True,
+                 kidney_files=None,
+                 window_width=400,
+                 window_center=50,
+                 min_kidney_pixels=100,
+                 cache_dir=None,
+                 use_cache=True,
+                 val_ratio=0.15,
+                 test_ratio=0.15,
+                 split='train',
+                 seed=42):
+        self.root_dir = Path(root_dir)
         self.transform = transform
         self.combine_kidneys = combine_kidneys
+        self.filter_empty = filter_empty
+        self.kidney_files = kidney_files or ["kidney_right.nii.gz", "kidney_left.nii.gz"]
+        self.window_width = window_width
+        self.window_center = window_center
+        self.min_kidney_pixels = min_kidney_pixels
+        self.use_cache = use_cache
+        self.split = split
+        self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
+        self.seed = seed
         
-        patient_dirs = sorted([d for d in Path(root_dir).iterdir() if d.is_dir()])
+        self.cache_file = None
+        if cache_dir:
+            cache_dir = Path(cache_dir)
+            if not cache_dir.exists():
+                cache_dir.mkdir(exist_ok=True, parents=True)
+            cache_filename = f"kidney_dataset_{'combined' if combine_kidneys else 'separate'}_cache.pt"
+            self.cache_file = Path(cache_dir) / cache_filename
+            
+        self.samples = self._load_data()
         
-        for patient_dir in patient_dirs:
+        if split in ['train', 'val', 'test']:
+            self._split_dataset()
+            
+    def _load_data(self):
+        """2D slices NIFTI files loading"""
+        if self.use_cache and self.cache_file and self.cache_file.exists():
+            print(f"Loading from cache: {self.cache_file}")
+            cached_data = torch.load(self.cache_file)
+            return cached_data
+            
+        samples = []
+        patient_dirs = sorted([d for d in self.root_dir.iterdir() if d.is_dir()])
+        
+        print(f"Found {len(patient_dirs)} patient directories...")
+        for patient_dir in tqdm(patient_dirs, desc="Patients processing"):
             patient_path = Path(patient_dir)
             ct_path = patient_path / "ct.nii.gz"
-            left_path = patient_path / "kidney_left.nii.gz"
-            right_path = patient_path / "kidney_right.nii.gz"
             
-            if not ct_path.exists() or not left_path.exists() or not right_path.exists():
-                print(f"Missing files for {patient_dir}, skipping.")
+            if not ct_path.exists():
                 continue
-        
-            ct_volume = nib.load(ct_path).get_fdata()
-            left_volume = nib.load(left_path).get_fdata()
-            right_volume = nib.load(right_path).get_fdata()
-            
-            assert ct_volume.shape == left_volume.shape == right_volume.shape, "CT and mask volumes must have the same shape."
-            
-            depth = ct_volume.shape[2]
-            
-            for idx in range(depth):
-                left_slice = left_volume[:, :, idx]
-                right_slice = right_volume[:, :, idx]
                 
-                if np.sum(left_slice) == 0 and np.sum(right_slice) == 0:
-                    continue # Skip empty slices
-                
-                self.samples.append({
-                    'ct_slice': ct_volume[:, :, idx],
-                    'left_mask': left_slice,
-                    'right_mask': right_slice,
-                })
-            
-        def __len__(self):
-            return len(self.samples)
-        
-        def __getitem__(self, idx):
-            sample = self.samples[idx]
-            
-            image = sample['ct_slice']
-            left = sample['left_mask']
-            right = sample['right_mask']
-            
-            if self.combine_kidneys:
-                mask = np.clip(left + right, 0, 1)[None, ...]
-            else:
-                mask = np.stack([left, right], axis=0)
-            
-            if self.transform:
-                data = {'image': image, 'label': mask}
-                data = self.transform(data)
-                image = torch.tensor(data['image'], dtype=torch.float32)
-                mask = torch.tensor(data['label'], dtype=torch.float32)
-
-            return image, mask
-        
-
-def get_totalsegmentator_labels(input_dir, output_dir, roi_subset=None):
-    """
-    Generate segmentation masks for NIfTI files in the specified directory.
-    Uses the TotalSegmentator library to perform the segmentation.
-    
-    Args:
-        input_dir (str or Path): Directory containing NIfTI files.
-        output_dir (str or Path): Directory to save the generated segmentation masks.
-        roi_subset (list, optional): List of regions of interest to segment.
-    """
-    
-    output_dir = Path(output_dir)
-    input_dir = Path(input_dir)
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for directory in input_dir.iterdir():
-        if not directory.is_dir():
-            continue
-            
-        print(f"Processing directory: {directory}")
-        
-        out_dir = output_dir / directory.name
-        out_dir.mkdir(parents=True, exist_ok=True)
-        
-        for filename in directory.glob('*.nii*'):
-            if filename.suffix == '.nii' or filename.suffix == '.nii.gz':
-                print(f"  Processing file: {filename.name}")
-                
-                output_path = out_dir / filename.stem
-                output_path.mkdir(parents=True, exist_ok=True)
-                
-                # check if the mask already exists
-                if output_path.exists():
-                    print(f"  Mask already exists for {filename.name}, skipping.")
+            mask_paths = []
+            if patient_path.name.startswith('s'):  #TotalSegmentator dataset format
+                seg_dir = patient_path / "segmentations"
+                if not seg_dir.exists():
                     continue
-
-                try:
-                    totalsegmentator(
-                        str(filename),
-                        str(output_path),
-                        roi_subset=roi_subset,
-                    )
-                    print(f"  Successfully segmented {filename.name}")
-                except Exception as e:
-                    print(f"  Error processing {filename.name}: {str(e)}")
+                mask_paths = [seg_dir / mask_file for mask_file in self.kidney_files]
+            else:
+                mask_paths = [patient_path / mask_file for mask_file in self.kidney_files]
+                
+            if not all(mask_path.exists() for mask_path in mask_paths):
+                continue
+                
+            try:
+                ct_nifti = nib.load(str(ct_path))
+                ct_volume = ct_nifti.get_fdata()
+                
+                min_value = self.window_center - self.window_width//2
+                max_value = self.window_center + self.window_width//2
+                ct_volume = np.clip(ct_volume, min_value, max_value)
+                ct_volume = (ct_volume - min_value) / (max_value - min_value)
+                
+                mask_volumes = []
+                mask_volume_shapes = []
+                for mask_path in mask_paths:
+                    mask_nifti = nib.load(str(mask_path))
+                    mask_volume = mask_nifti.get_fdata()
+                    mask_volumes.append(mask_volume)
+                    mask_volume_shapes.append(mask_volume.shape)
+                
+                if len(set(map(tuple, mask_volume_shapes))) > 1 or ct_volume.shape != mask_volumes[0].shape:
+                    print(f"Skipped {patient_dir} - uneven shapes, ct: {ct_volume.shape}, mask: {mask_volume_shapes}")
+                    continue
+                
+                depth = ct_volume.shape[2]
+                for z_idx in range(depth):
+                    ct_slice = ct_volume[:, :, z_idx]
                     
-        print(f"Completed processing directory: {directory}\n")
+                    organ_masks = []
+                    for mask_volume in mask_volumes:
+                        organ_masks.append(mask_volume[:, :, z_idx])
+                    
+                    if self.filter_empty:
+                        total_kidney_pixels = sum(np.sum(mask > 0) for mask in organ_masks)
+                        if total_kidney_pixels < self.min_kidney_pixels:
+                            continue
+                    
+                    slice_data = {
+                        'patient_id': patient_dir.name,
+                        'slice_idx': z_idx,
+                        'ct_slice': ct_slice,
+                        'organ_masks': organ_masks
+                    }
+                    
+                    samples.append(slice_data)
+                
+            except Exception as e:
+                print(f"Processing error {patient_dir}: {str(e)}")
+        
+        print(f"Found {len(samples)} kidney slices")
+        
+        if self.cache_file is not None:
+            print(f"Saving to cache: {self.cache_file}")
+            torch.save(samples, self.cache_file)
+            
+        return samples
+        
+    def _split_dataset(self):
+        """Training, validation and test sets split (patient-wise split)"""
+        patient_ids = list(set(sample['patient_id'] for sample in self.samples))
 
-    print("All processing complete!")
-    
-    
-from pathlib import Path
-import nibabel as nib
-import numpy as np
-from monai.transforms import *
-from monai.data import Dataset, DataLoader
-from monai.utils import set_determinism
-
-def prepare_data(images_path, masks_path, roi_subset, val_split=0.2, seed=42):
-    """
-    Prepare the data for training by applying various transformations and creating DataLoaders.
-    
-    Args:
-        images_path (str or Path): Path to the directory containing CT images
-        masks_path (str or Path): Path to the directory containing mask folders.
-        roi_subset (list of str): List of organs to use
-        val_split (float): Validation split ratio (0.0-1.0)
-        seed (int): Random seed for reproducibility
-
-    Returns:
-        tuple: (train_loader, val_loader, train_files, val_files)
-    """
-    set_determinism(seed=seed)
-    images_path = Path(images_path)
-    masks_path = Path(masks_path)
-
-    all_files = []
-    skipped_count = 0
-    total_count = 0
-
-    for patient_dir in sorted(p.name for p in images_path.iterdir() if p.is_dir()):
-        patient_path = images_path / patient_dir
-        mask_patient_path = masks_path / patient_dir
-
-        if not patient_path.is_dir():
-            continue
-
-        for image_file in sorted(f.name for f in patient_path.iterdir() if f.suffix in ['.nii', '.nii.gz']):
-            total_count += 1
-            img_full_path = patient_path / image_file
-            mask_folder = mask_patient_path / Path(image_file).stem
-
-            if not mask_folder.exists():
-                print(f"Mask folder not found for {img_full_path}, skipping.")
-                skipped_count += 1
-                continue
-
-            # Initialize empty mask
-            first_mask_path = mask_folder / f"{roi_subset[0]}.nii.gz"
-            if not first_mask_path.exists():
-                print(f"No organ masks found for {img_full_path}, skipping.")
-                skipped_count += 1
-                continue
-
-            example_mask = nib.load(first_mask_path)
-            merged_mask_data = np.zeros(example_mask.shape, dtype=np.uint8)
-            merged_mask_affine = example_mask.affine
-
-            # Fill merged mask
-            for idx, organ_name in enumerate(roi_subset, start=1):
-                organ_mask_path = mask_folder / f"{organ_name}.nii.gz"
-                if organ_mask_path.exists():
-                    organ_mask = nib.load(organ_mask_path).get_fdata()
-                    merged_mask_data[organ_mask > 0] = idx
-                else:
-                    print(f"Warning: {organ_name} mask missing for {img_full_path}")
-
-            # Save merged mask
-            merged_mask_output_path = mask_folder / "merged_masks.nii.gz"
-            nib.save(nib.Nifti1Image(merged_mask_data, merged_mask_affine), merged_mask_output_path)
-
-            all_files.append({'image': str(img_full_path), 'label': str(merged_mask_output_path)})
-
-    print(f"Found {len(all_files)} valid image-mask pairs (skipped {skipped_count} of {total_count} total)")
-    
-    if len(all_files) == 0:
-        raise ValueError("No valid image-mask pairs found. Please check your data.")
-
-    train_files, val_files = train_test_split(
-        all_files, test_size=val_split, random_state=seed
-    )
-    
-    print(f"Training set: {len(train_files)} samples")
-    print(f"Validation set: {len(val_files)} samples")
-
-    train_transforms = Compose([
-        LoadImaged(keys=['image', 'label']),
-        EnsureChannelFirstd(keys=['image', 'label']),
-        Spacingd(keys=['image', 'label'], pixdim=(1.5, 1.5, 1.5), mode=('bilinear', 'nearest')),
-        Orientationd(keys=['image', 'label'], axcodes='RAS'),
-        ScaleIntensityRanged(keys=['image'], a_min=-100, a_max=300, b_min=0.0, b_max=1.0, clip=True),
-        RandCropByPosNegLabeld(
-            keys=['image', 'label'], 
-            label_key='label', 
-            spatial_size=(128, 128, 128),
-            pos=1, 
-            neg=1,
-            num_samples=4
-        ),
-        RandRotate90d(keys=['image', 'label'], prob=0.5, spatial_axes=[0, 1]),
-        RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=0),
-        RandGaussianNoised(keys=['image'], prob=0.3, mean=0.0, std=0.01),
-        RandAdjustContrastd(keys=['image'], prob=0.3, gamma=(0.8, 1.2)),
-        RandAffined(
-            keys=['image', 'label'], 
-            prob=0.5, 
-            rotate_range=(0.05, 0.05, 0.05), 
-            scale_range=(0.05, 0.05, 0.05),
-            mode=('bilinear', 'nearest')
+        train_val_patients, test_patients = train_test_split(
+            patient_ids, test_size=self.test_ratio, random_state=self.seed
         )
-    ])
-    
-    val_transforms = Compose([
-        LoadImaged(keys=['image', 'label']),
-        EnsureChannelFirstd(keys=['image', 'label']),
-        Spacingd(keys=['image', 'label'], pixdim=(1.5, 1.5, 1.5), mode=('bilinear', 'nearest')),
-        Orientationd(keys=['image', 'label'], axcodes='RAS'),
-        ScaleIntensityRanged(keys=['image'], a_min=-100, a_max=300, b_min=0.0, b_max=1.0, clip=True),
-    ])
+        
+        if self.val_ratio > 0:
+            val_ratio_adjusted = self.val_ratio / (1 - self.test_ratio)
+            train_patients, val_patients = train_test_split(
+                train_val_patients, test_size=val_ratio_adjusted, random_state=self.seed
+            )
+        else:
+            train_patients, val_patients = train_val_patients, []
+            
+        if self.split == 'train':
+            self.samples = [s for s in self.samples if s['patient_id'] in train_patients]
+        elif self.split == 'val':
+            self.samples = [s for s in self.samples if s['patient_id'] in val_patients]
+        elif self.split == 'test':
+            self.samples = [s for s in self.samples if s['patient_id'] in test_patients]
+            
+        print(f"Subset: '{self.split}': {len(self.samples)} slices")
 
-    train_ds = Dataset(data=train_files, transform=train_transforms)
-    val_ds = Dataset(data=val_files, transform=val_transforms)
+    def __len__(self):
+        return len(self.samples)
+        
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        
+        image = sample['ct_slice'].astype(np.float32)
+        organ_masks = sample['organ_masks']
+        
+        if self.combine_kidneys:
+            mask = np.zeros_like(image, dtype=np.float32)
+            for organ_mask in organ_masks:
+                mask = np.logical_or(mask, organ_mask > 0).astype(np.float32)
+            mask = mask[np.newaxis, :, :] # channel dim add
+        else:
+            masks = [organ_mask.astype(np.float32) for organ_mask in organ_masks]
+            mask = np.stack(masks, axis=0)
+        
+        image = image[np.newaxis, :, :]
+            
+        if self.transform:
+            transformed = self.transform(image=image.transpose(1, 2, 0), 
+                                        mask=mask.transpose(1, 2, 0))
+            image = transformed['image'].transpose(2, 0, 1)
+            mask = transformed['mask'].transpose(2, 0, 1)
+        
+        return {
+            'image': torch.from_numpy(image),
+            'mask': torch.from_numpy(mask),
+            'patient_id': sample['patient_id'],
+            'slice_idx': sample['slice_idx']
+        }
 
-    train_loader = DataLoader(
-        train_ds, 
-        batch_size=2, 
-        shuffle=True, 
-        num_workers=2, 
-        pin_memory=True,
-        collate_fn=list_data_collate
-    )
-    
-    val_loader = DataLoader(
-        val_ds, 
-        batch_size=1, 
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True
-    )
 
-    return train_loader, val_loader, train_files, val_files
-
-def prepare_totalsegmentator_dataset(dataset_path, roi_subset,
-                                     val_split=0.2, seed=42):
+def create_kidney_dataloaders(root_dir,
+                             batch_size=16,
+                             num_workers=4,
+                             combine_kidneys=True,
+                             cache_dir=None,
+                             val_ratio=0.15,
+                             test_ratio=0.15,
+                             seed=42):
     """
-    Prepare the data from TotalSegmentator dataset structure.
+    Creates segmentation dataloaders for: train, val, test sets
     
     Args:
-        dataset_path (str or Path): Path to the dataset root
-        roi_subset (list): List of organs to include in segmentation
-        val_split (float): Validation split ratio
+        root_dir (str): Data directory path
+        batch_size (int): Number of samples in a batch
+        num_workers (int): Processing units count
+        combine_kidneys (bool): Whether to combine both kidney masks into one
+        cache_dir (str): Cache dir path
+        val_ratio (float): Validation set percentage ratio
+        test_ratio (float): Test set percentage ratio
         seed (int): Random seed
         
     Returns:
-        tuple: (train_loader, val_loader, train_files, val_files)
+        tuple: (train_loader, val_loader, test_loader)
     """
     
-
-    set_determinism(seed=seed)
-    dataset_path = Path(dataset_path)
+    train_transform = A.Compose([
+        A.Normalize(mean=(0.5,), std=(0.5,), p=1.0),
+        A.OneOf([
+            A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+        ], p=0.5),
+        A.OneOf([
+            A.ElasticTransform(alpha=60, sigma=60 * 0.05, p=0.5),
+            A.GridDistortion(p=0.5),
+            A.OpticalDistortion(distort_limit=2, p=0.5),
+        ], p=0.3),
+        A.Affine(translate_percent=0.1, scale=(0.9, 1.1), rotate=(-15, 15), p=0.5),
+        A.Resize(512, 512, p=1.0),
+        A.GaussNoise(p=0.2, std_range=(0.01, 0.05)),
+    ])
     
-    # Find all subject folders
-    subject_dirs = sorted([d for d in dataset_path.iterdir() if d.is_dir() and d.name.startswith('s')])
-    print(f"Found {len(subject_dirs)} subject directories")
+    # normalization only
+    val_transform = A.Compose([
+        A.Normalize(mean=(0.5,), std=(0.5,), p=1.0),
+        A.Resize(512, 512, p=1.0),
+    ])
     
-    all_files = []
-    progress_bar = tqdm.tqdm(subject_dirs, desc="Processing subjects")
-    
-    for subject_dir in progress_bar:
-        progress_bar.set_description(f"Processing {subject_dir.name}")
-        
-        # Check if CT file exists
-        ct_file = subject_dir / "ct.nii.gz"
-        if not ct_file.exists():
-            progress_bar.write(f"CT file not found for {subject_dir}, skipping.")
-            continue
-            
-        # Check if segmentation directory exists
-        seg_dir = subject_dir / "segmentations"
-        if not seg_dir.exists() or not seg_dir.is_dir():
-            progress_bar.write(f"Segmentation directory not found for {subject_dir}, skipping.")
-            continue
-        
-        # Check if merged mask already exists - skip processing
-        merged_mask_path = seg_dir / "merged_kidneys.nii.gz"
-        if merged_mask_path.exists():
-            progress_bar.write(f"Merged mask already exists for {subject_dir.name}, using existing.")
-            all_files.append({'image': str(ct_file), 'label': str(merged_mask_path)})
-            continue
-            
-        # Check if all required segmentations exist
-        missing_segmentations = False
-        for organ in roi_subset:
-            organ_file = seg_dir / f"{organ}.nii.gz"
-            if not organ_file.exists():
-                progress_bar.write(f"Segmentation for {organ} not found in {subject_dir}, skipping.")
-                missing_segmentations = True
-                break
-                
-        if missing_segmentations:
-            continue
-            
-        # Create merged mask
-        first_seg_path = seg_dir / f"{roi_subset[0]}.nii.gz"
-        try:
-            example_seg = nib.load(first_seg_path)
-            merged_mask_data = np.zeros(example_seg.shape, dtype=np.uint8)
-            merged_mask_affine = example_seg.affine
-            
-            # Merge all organ masks
-            for idx, organ_name in enumerate(roi_subset, start=1):
-                organ_path = seg_dir / f"{organ_name}.nii.gz"
-                organ_mask = nib.load(organ_path).get_fdata()
-                merged_mask_data[organ_mask > 0] = idx
-                
-            # Save merged mask
-            nib.save(nib.Nifti1Image(merged_mask_data, merged_mask_affine), merged_mask_path)
-            
-            # Add to dataset
-            all_files.append({'image': str(ct_file), 'label': str(merged_mask_path)})
-        except Exception as e:
-            progress_bar.write(f"Error processing {subject_dir.name}: {str(e)}")
-    
-    print(f"Found {len(all_files)} valid image-mask pairs")
-    if len(all_files) == 0:
-        raise ValueError("No valid image-mask pairs found. Please check your dataset path.")
-        
-    train_files, val_files = train_test_split(
-        all_files, test_size=val_split, random_state=seed
+    train_ds = Kidneys2dDataset(
+        root_dir=root_dir,
+        transform=train_transform,
+        combine_kidneys=combine_kidneys,
+        filter_empty=True,
+        cache_dir=cache_dir,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        split='train',
+        seed=seed
     )
     
-    print(f"Training set: {len(train_files)} samples")
-    print(f"Validation set: {len(val_files)} samples")
+    val_ds = Kidneys2dDataset(
+        root_dir=root_dir,
+        transform=val_transform,
+        combine_kidneys=combine_kidneys,
+        filter_empty=True,
+        cache_dir=cache_dir,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        split='val',
+        seed=seed
+    )
     
-    # Analyze foreground pixels
-    print("Verifying dataset foreground pixels...")
-    
-    train_transforms = Compose([
-        LoadImaged(keys=['image', 'label']),
-        EnsureChannelFirstd(keys=['image', 'label']),
-        Spacingd(keys=['image', 'label'], pixdim=(2.0, 2.0, 2.0), mode=('bilinear', 'nearest')),  # Lower resolution
-        Orientationd(keys=['image', 'label'], axcodes='RAS'),
-        ScaleIntensityRanged(keys=['image'], a_min=-100, a_max=300, b_min=0.0, b_max=1.0, clip=True),
-        CropForegroundd(keys=['image', 'label'], source_key='label', margin=10),
-        RandCropByPosNegLabeld(
-            keys=['image', 'label'], 
-            label_key='label', 
-            spatial_size=(96, 96, 96),
-            pos=2,
-            neg=1,
-            num_samples=2
-        ),
-
-        RandRotate90d(keys=['image', 'label'], prob=0.5, spatial_axes=[0, 1]),
-        RandFlipd(keys=['image', 'label'], prob=0.5, spatial_axis=0),
-        RandGaussianNoised(keys=['image'], prob=0.2, mean=0.0, std=0.01),
-        RandAffined(
-            keys=['image', 'label'], 
-            prob=0.5, 
-            rotate_range=(0.05, 0.05, 0.05), 
-            scale_range=(0.05, 0.05, 0.05),
-            mode=('bilinear', 'nearest'),
-            padding_mode="zeros"
-        )
-    ])
-    
-    val_transforms = Compose([
-        LoadImaged(keys=['image', 'label']),
-        EnsureChannelFirstd(keys=['image', 'label']),
-        Spacingd(keys=['image', 'label'], pixdim=(2.0, 2.0, 2.0), mode=('bilinear', 'nearest')),
-        Orientationd(keys=['image', 'label'], axcodes='RAS'),
-        ScaleIntensityRanged(keys=['image'], a_min=-100, a_max=300, b_min=0.0, b_max=1.0, clip=True),
-        CropForegroundd(keys=['image', 'label'], source_key='label', margin=10),  # Crop to reduce memory
-    ])
-    
-    train_ds = Dataset(data=train_files, transform=train_transforms)
-    val_ds = Dataset(data=val_files, transform=val_transforms)
-    
-    print("Checking sample data for foreground pixels...")
-    try:
-        check_data = first(train_ds)
-        label = check_data['label']
-        unique_values = np.unique(label.numpy())
-        print(f"Sample label contains classes: {unique_values}")
-        foreground_count = np.sum(label.numpy() > 0)
-        print(f"Foreground pixels in sample: {foreground_count}")
-        if foreground_count == 0:
-            print("WARNING: No foreground pixels found in sample! Check your masks.")
-    except Exception as e:
-        print(f"Error checking sample: {e}")
+    test_ds = Kidneys2dDataset(
+        root_dir=root_dir,
+        transform=val_transform,
+        combine_kidneys=combine_kidneys,
+        filter_empty=True,
+        cache_dir=cache_dir,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        split='test',
+        seed=seed
+    )
     
     train_loader = DataLoader(
-        train_ds, 
-        batch_size=1,
-        shuffle=True, 
-        num_workers=2,
-        pin_memory=True,
-        collate_fn=list_data_collate
-    )
-    
-    val_loader = DataLoader(
-        val_ds, 
-        batch_size=1, 
-        shuffle=False,
-        num_workers=1,
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
         pin_memory=True
     )
     
-    return train_loader, val_loader, train_files, val_files
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    return train_loader, val_loader, test_loader
