@@ -3,66 +3,97 @@ Main script for CT segmentation project.
 """
 
 import torch
-import nibabel as nib
+import argparse
+from pathlib import Path
+from datetime import datetime
 
-from ctseg.data import get_labels, prepare_data, prepare_totalsegmentator_dataset
-from ctseg.train import train_unet
-from ctseg.models import create_unet_model,  create_segresnet_model
-from ctseg.eval import inference_on_new_data, evaluate_model, browse_ct_segmentation_colored
+from ctseg.data import create_kidney_dataloaders
+from ctseg.train import train_unet_2d
+from ctseg.models import create_unet_2d_model
 
+def debug_dataloader(dataloader, num_batches=2):
+    print("\n=== Debug DataLoader ===")
+    for i, batch in enumerate(dataloader):
+        if i >= num_batches:
+            break
+        images = batch['image']
+        masks = batch['mask']
+        print(f"Batch {i+1}:")
+        print(f"  Image shape: {images.shape}, range: {images.min().item():.3f} to {images.max().item():.3f}")
+        print(f"  Mask shape: {masks.shape}, range: {masks.min().item():.3f} to {masks.max().item():.3f}")
+        print(f"  Mask unique values: {torch.unique(masks).tolist()}")
+        print(f"  Mask channel sums: {masks.sum(dim=(0,2,3))}")
 
 def main():
     """Main function to run the segmentation pipeline."""
     torch.cuda.empty_cache()
-    
-    dataset_path = "dataset"
-    roi_subset = ["kidney_right", "kidney_left"]
+
+    parser = argparse.ArgumentParser(description="CT Segmentation Training Pipeline")
+    parser.add_argument("--mode", type=str, default="2d", choices=["2d", "3d"], 
+                        help="Training mode: 2d or 3d")
+    parser.add_argument("--dataset", type=str, default="dataset", 
+                        help="Path to dataset directory")
+    parser.add_argument("--epochs", type=int, default=80,
+                        help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=64,
+                        help="Batch size for training")
+    parser.add_argument("--lr", type=float, default=1e-4,
+                        help="Learning rate")
+    parser.add_argument("--model_name", type=str, default="segmentation_model.pth",
+                        help="Model name for saving")
+    parser.add_argument("--num_patients", type=int, default=100,
+                    help="Number of patients to use for training")
+    parser.add_argument("--min_mask_pixels", type=int, default=50,
+                    help="Number of patients to use for training")
+    args = parser.parse_args()
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     print("Preparing data...")
-    train_loader, val_loader, train_files, val_files = prepare_totalsegmentator_dataset(
-        dataset_path, 
-        roi_subset=roi_subset
-    )
     
-    print("Creating model...")
-    model = create_unet_model(in_channels=1, out_channels=3, device=device)
-    
-    print("Starting training...")
-    history = train_unet(
-        model=model,
-        epochs=100, 
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        lr=3e-4,
-        save_path="unet_kidneys.pth"
-    )
-    
-    model = model.load_state_dict(torch.load("unet_kidneys.pth"))
-    
+    if args.mode == "2d":
+        train_loader, val_loader, test_loader = create_kidney_dataloaders(
+            root_dir=args.dataset,
+            batch_size=args.batch_size,
+            num_patients=args.num_patients,
+            min_kidney_mask_pixels=args.min_mask_pixels,
+        )
+        
+        #debug_dataloader(train_loader, num_batches=2)
+        #debug_dataloader(val_loader, num_batches=2)
 
-    # Inference on first validation example
-    test_image_path = val_files[0]['image']
-    print(f"Performing inference on {test_image_path}...")
-    image_data_raw, segmentation_result = inference_on_new_data(
-        model, 
-        test_image_path, 
-        device, 
-        'segmented_totalsegmentator_result.nii.gz'
-    )
+        print("Creating 2D UNet model...")
+        out_channels = 1
+        model = create_unet_2d_model(in_channels=1, out_channels=out_channels, device=device)
+        print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
+        
+        print("Starting training...")
+        
+        run_dir = "runs" / Path(datetime.now().strftime("%Y%m%d_%H%M%S"))
+        run_dir.mkdir(parents=True, exist_ok=True)
+        
+        save_path = run_dir / args.model_name
+        
+        model, history = train_unet_2d(
+            model=model,
+            epochs=args.epochs, 
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device,
+            lr=args.lr,
+            save_path=save_path,
+        )
+            
+        print(f"Best model saved at: {args.save_path}")
+        
+        # todo: eval on test set, save results, plots from history
+        print("Evaluating on test set...")
+        
+    else:  # mode == "3d"
+        pass
     
-    label_path = val_files[0]['label']
-    label_data = nib.load(label_path).get_fdata()
-    
-    print("CT shape:", image_data_raw.shape)
-    print("Label shape:", label_data.shape)
-    print("Prediction shape:", segmentation_result.shape)
-    
-    print("Displaying results...")
-    browse_ct_segmentation_colored(image_data_raw, segmentation_result)
+    print("Training completed!")
 
 if __name__ == "__main__":
     main()
