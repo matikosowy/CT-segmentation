@@ -91,14 +91,18 @@ def main():
                 batch_size=args.batch_size,
                 num_patients=args.num_patients,
                 min_kidney_mask_pixels=args.min_mask_pixels,
-                mode="test",
+                split="test",
             )
+
+            # Save predictions in the same directory as the checkpoint
+            checkpoint_path = Path(args.checkpoint)
+            output_dir = checkpoint_path.parent / "eval"
 
             evaluate_model(
                 model=model,
                 test_loader=test_loader,
                 device=device,
-                output_dir="inference_results",
+                output_dir=output_dir,
             )
 
             return
@@ -134,6 +138,8 @@ def main():
             print("=" * 50)
             print(f"Resuming training from {args.checkpoint}...")
             checkpoint = torch.load(args.checkpoint, map_location=device)
+            torch.save(checkpoint["model_state_dict"], run_dir / "best_model.pth")
+
             model, history = resume_training_2d(
                 model=model,
                 checkpoint=checkpoint,
@@ -158,6 +164,10 @@ def main():
                 run_dir=run_dir,
             )
 
+        # Clean up after training
+        torch.cuda.empty_cache()
+        gc.collect()
+
         plot_history(
             history=history,
             run_dir=run_dir,
@@ -172,6 +182,10 @@ def main():
 
     else:  # mode == "3d"
         pass
+
+    # Clean up after all operations
+    torch.cuda.empty_cache()
+    gc.collect()
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ def evaluate_model(model, test_loader, device, output_dir="evaluation_results"):
         dict: Dictionary containing evaluation metrics
     """
     print("=" * 30)
-    print("EVALUATION")
+    print("EVALUATION - please wait... (0% for a while)")
     model.eval()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -114,5 +114,16 @@ def evaluate_model(model, test_loader, device, output_dir="evaluation_results"):
     print(f"F1 Score: {avg_metrics['f1_score']: .4f}")
     print(f"Samples evaluated: {avg_metrics['samples_evaluated']}")
     print("=============================\n")
+
+    # Save the same metrics to a text file
+    metrics_file = output_dir / "evaluation_metrics.txt"
+    with open(metrics_file, "w") as f:
+        f.write("===== Evaluation Metrics =====\n")
+        f.write(f"Dice Score: {avg_metrics['dice_score']: .4f}\n")
+        f.write(f"Jaccard Index (IoU): {avg_metrics['jaccard_index']: .4f}\n")
+        f.write(f"Precision: {avg_metrics['precision']: .4f}\n")
+        f.write(f"Recall: {avg_metrics['recall']: .4f}\n")
+        f.write(f"F1 Score: {avg_metrics['f1_score']: .4f}\n")
+        f.write(f"Samples evaluated: {avg_metrics['samples_evaluated']}\n")
 
     return avg_metrics

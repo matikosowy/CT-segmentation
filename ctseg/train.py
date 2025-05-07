@@ -88,7 +88,7 @@ def train_unet_2d(
 
     print("=" * 30)
     print("TRAINING")
-    print("First epoch may take a bit longer...")
+    print("First epoch may take a bit longer... (0% for a while)")
 
     for epoch in range(epochs):
         model.train()
@@ -226,9 +226,10 @@ def train_unet_2d(
         "jaccard_score": jaccard_scores,
     }
 
-    # Label best model metrics (empty directory's name)
-    temp = run_dir / f"dice-{best_dice: .4f}"
-    temp.mkdir(parents=True, exist_ok=True)
+    # Write the best dice score to a .txt file (as a marker/label)
+    file_name = run_dir / f"DICE_{best_dice}.txt"
+    with open(file_name, "w") as f:
+        f.write("")
 
     print("Training completed!")
     return model, history
