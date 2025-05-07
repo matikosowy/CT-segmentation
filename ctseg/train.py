@@ -25,14 +25,19 @@ def train_unet_2d(
     device,
     lr=1e-4,
     run_dir=datetime.now().strftime("%Y%m%d_%H%M%S"),
-    weight_decay=1e-5
+    weight_decay=1e-5,
+    optimizer=None,
+    scheduler=None,
+    start_epoch=0,
+    best_dice=0.0,
+    history=None,
 ):
     """
     Train the 2D U-Net model for kidney segmentation. 
     This function handles the training loop, validation, and saving of the best model based on the Dice score.
 
     Args:
-        model (nn.Module): _description_
+        model (nn.Module): Model to be trained.
         epochs (int): Number of training epochs.
         train_loader (DataLoader): DataLoader for training data.
         val_loader (DataLoader): DataLoader for validation data.
@@ -40,6 +45,11 @@ def train_unet_2d(
         lr (float, optional): Learning rate for the optimizer. Defaults to 1e-4.
         run_dir (str, Path, optional): Directory to save the model and training logs. Defaults to current date and time.
         weight_decay (float, optional): Weight decay for the optimizer. Defaults to 1e-5.
+        optimizer (torch.optim.Optimizer, optional): Optimizer for training. Defaults to Adam.
+        scheduler (torch.optim.lr_scheduler, optional): Learning rate scheduler. Defaults to ReduceLROnPlateau.
+        start_epoch (int, optional): Epoch to start training from. Defaults to 0.
+        best_dice (float, optional): Best Dice score achieved so far. Defaults to 0.0.
+        history (dict, optional): Dictionary to store training and validation metrics. Defaults to None.
 
     Returns:
         model (nn.Module): Trained model.
@@ -53,21 +63,34 @@ def train_unet_2d(
         include_background=True,
         lambda_ce=0.5,  
     )
-    optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    
+    if optimizer is None:
+        optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
     scaler = GradScaler()
     
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
-    )
+    if scheduler is None:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=5
+        )
     
-    best_dice = 0.0
-    train_losses, val_losses = [], []
-    dice_scores, jaccard_scores = [], []
+    best_dice = 0.0 if best_dice is None else best_dice
+    
+    if history is None:
+        train_losses, val_losses = [], []
+        dice_scores, jaccard_scores = [], []
+    else:
+        train_losses = history['train_loss']
+        val_losses = history['val_loss']
+        dice_scores = history['dice_score']
+        jaccard_scores = history['jaccard_score']
 
+    print("=" * 50)
+    print("Starting training...")
     for epoch in range(epochs):
         model.train()
         epoch_train_loss = 0.0
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        progress_bar = tqdm(train_loader, desc=f"Epoch {start_epoch+epoch+1}/{start_epoch+epochs} [Train]")
         
         for batch in progress_bar:
             images = batch['image'].to(device)
@@ -151,7 +174,22 @@ def train_unet_2d(
 
         if avg_dice > best_dice:
             best_dice = avg_dice
-            torch.save(model.state_dict(), run_dir / "best_model.pth")
+            
+            checkpoint = {
+                'epoch': start_epoch+epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_dice': best_dice,
+                'history': {
+                    'train_loss': train_losses,
+                    'val_loss': val_losses,
+                    'dice_score': dice_scores,
+                    'jaccard_score': jaccard_scores
+                }
+            }
+            
+            torch.save(checkpoint, run_dir / "best_model.pth")
             print(f"\nNew best model saved (Dice: {best_dice:.4f})")
 
         train_losses.append(avg_train_loss)
@@ -166,30 +204,6 @@ def train_unet_2d(
         print(f"Dice Score: {avg_dice:.4f}")
         print(f"Jaccard Index: {avg_jaccard:.4f}")
         print("-" * 50)
-
-    plt.figure(figsize=(15, 5))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Val Loss')
-    plt.title('Loss Progression')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-
-    plt.subplot(1, 2, 2)
-    plt.plot(dice_scores, label='Dice Score')
-    plt.plot(jaccard_scores, label='Jaccard Index')
-    plt.title('Validation Metrics')
-    plt.xlabel('Epoch')
-    plt.ylabel('Score')
-    plt.legend()
-
-    plt.tight_layout()
-    
-    fig_path = run_dir / "train_plot.png"
-    plt.savefig(fig_path)
-    plt.show()
     
     history = {
         'train_loss': train_losses,
@@ -198,8 +212,72 @@ def train_unet_2d(
         'jaccard_score': jaccard_scores
     }
     
-    # Label best model metrics
+    # Label best model metrics (empty directory's name)
     temp = run_dir / f"dice{best_dice:.4f}-loss{avg_val_loss:.4f}"
     temp.mkdir(parents=True, exist_ok=True)
 
+    print(f"Training completed!")
+    return model, history
+
+
+def resume_training_2d(
+    checkpoint,
+    model,
+    epochs,
+    train_loader,
+    val_loader,
+    device,
+    lr=1e-4,
+    run_dir=datetime.now().strftime("%Y%m%d_%H%M%S"),
+    weight_decay=1e-5,
+):
+    """
+    Resume training from a checkpoint.
+    This function loads the model and optimizer state from a checkpoint file and continues training.
+    
+    Args:
+        checkpoint (str): Path to the checkpoint file.
+        model (nn.Module): Model's architecture.
+        epochs (int): Number of training epochs.
+        train_loader (DataLoader): DataLoader for training data.
+        val_loader (DataLoader): DataLoader for validation data.
+        device (torch.device): Device to run the model on (CPU or GPU).
+        lr (float, optional): Learning rate for the optimizer. Defaults to 1e-4.
+        run_dir (str, Path, optional): Directory to save the model and training logs. Defaults to current date and time.
+        weight_decay (float, optional): Weight decay for the optimizer. Defaults to 1e-5.
+
+    Returns:
+        model (nn.Module): Trained model.
+        history (dict): Dictionary containing training and validation loss, Dice score, and Jaccard index.
+    """
+    
+    optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5
+    )
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    
+    model.load_state_dict(checkpoint['model_state_dict']).to(device)
+    start_epoch = checkpoint['epoch'] + 1
+    best_dice = checkpoint['best_dice']
+    history = checkpoint['history']
+    
+    model, history = train_unet_2d(
+        model=model,
+        epochs=epochs,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device,
+        lr=lr,
+        run_dir=run_dir,
+        weight_decay=weight_decay,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        start_epoch=start_epoch,
+        best_dice=best_dice,
+        history=history,
+    )
+    
     return model, history

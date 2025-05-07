@@ -1,187 +1,117 @@
-import os
+from pathlib import Path
 import torch
 import numpy as np
-import nibabel as nib
 import matplotlib.pyplot as plt
-from pathlib import Path
-from monai.inferers import sliding_window_inference
-from monai.transforms import DivisiblePad
-from matplotlib.widgets import Slider
-from matplotlib import colors as mcolors
+from sklearn.metrics import jaccard_score, precision_score, recall_score, f1_score
+from tqdm import tqdm
 
 
-def inference_on_new_data(model, image_path, device, output_path='segmentation_result.nii.gz'):
+def evaluate_model(model, test_loader, device, output_dir="evaluation_results"):
     """
-    Perform inference on a new CT image.
+    Evaluate the model on the test set and save visualization results.
     
     Args:
-        model (nn.Module): Trained model.
-        image_path (str): Path to the CT image (NIFTI format).
-        device (torch.device): Computation device.
-        output_path (str): Path to save the segmentation result.
-    
+        model: Trained model to evaluate
+        test_loader: DataLoader for test data
+        device: Device to run evaluation on
+        output_dir: Directory to save visualization results
+        
     Returns:
-        tuple: Original image and segmentation result as numpy arrays.
+        dict: Dictionary containing evaluation metrics
     """
-    image_data = nib.load(image_path).get_fdata()
-    original_shape = image_data.shape
-    
-    image_data = np.expand_dims(image_data, axis=(0, 1))  # Add batch and channel dims
-    image_tensor = torch.from_numpy(image_data.astype(np.float32)).to(device)
-    
-    affine = nib.load(image_path).affine
-    
-    image_tensor = (image_tensor - image_tensor.min()) / (image_tensor.max() - image_tensor.min())
-    
-    # Remove batch dimension for padding
-    image_tensor = image_tensor.squeeze(0)
-    
-    # Pad for network
-    padder = DivisiblePad(k=16)
-    image_tensor_padded = padder(image_tensor)
-    
-    # Add batch dimension back
-    image_tensor_padded = image_tensor_padded.unsqueeze(0)
-    
-    print(f"Original shape: {image_tensor.shape}, Padded shape: {image_tensor_padded.shape}")
-    
-    # Inference
+    print("=" * 50)
+    print("Evaluating the model...")
     model.eval()
-    with torch.no_grad():
-        output = sliding_window_inference(
-            image_tensor_padded, roi_size=(128, 128, 128), sw_batch_size=1, predictor=model, overlap=0.5
-        )
-        pred = output.argmax(dim=1).cpu().numpy().squeeze()
-    
-    # Remove padding
-    pred = pred[
-        :original_shape[0],
-        :original_shape[1],
-        :original_shape[2]
-    ]
-    
-    nib.save(nib.Nifti1Image(pred.astype(np.uint8), affine), output_path)
-    print(f"Segmentation saved to {output_path}")
-    
-    return image_data.squeeze(), pred
-
-
-def evaluate_model(model, val_loader, device, output_dir="evaluation_results"):
-    """
-    Evaluate model performance on the validation set and save visualizations.
-    
-    Args:
-        model (nn.Module): Trained model.
-        val_loader (DataLoader): Validation data loader.
-        device (torch.device): Computation device.
-        output_dir (str): Directory to save results.
-    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-   
-    model.eval()
+    
+    dice_scores = []
+    jaccard_scores = []
+    precision_scores = []
+    recall_scores = []
+    f1_scores = []
     
     with torch.no_grad():
-        for i, batch_data in enumerate(val_loader):
-            if i >= 3:  # Evaluate only first 3 samples
-                break
+        for i, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
+            inputs = batch['image'].to(device)
+            labels = batch['mask'].to(device)
             
-            inputs = batch_data["image"].to(device)
-            labels = batch_data["label"].to(device)
+            outputs = model(inputs)
+            preds = torch.sigmoid(outputs)
+            preds_binary = (preds > 0.5).float()
             
-            # Make prediction with sliding window
-            outputs = sliding_window_inference(
-                inputs, roi_size=(128, 128, 128), sw_batch_size=1, predictor=model, overlap=0.5
-            )
+            inputs_np = inputs.cpu().numpy()
+            labels_np = labels.cpu().numpy()
+            preds_np = preds_binary.cpu().numpy()
             
-            # Convert to numpy arrays
-            inputs_np = inputs.cpu().numpy()[0, 0]  # [B, C, H, W, D] -> [H, W, D]
-            labels_np = labels.cpu().numpy()[0, 0]  # [B, C, H, W, D] -> [H, W, D]
-            outputs_np = outputs.argmax(dim=1).cpu().numpy()[0]  # [B, C, H, W, D] -> [H, W, D]
+            for j in range(inputs.shape[0]):
+                pred = preds_np[j].squeeze()
+                label = labels_np[j].squeeze()
+                
+                if label.sum() > 0:
+                    dice = 2 * (pred * label).sum() / (pred.sum() + label.sum() + 1e-8)
+                    dice_scores.append(dice)
+                    
+                    jac = jaccard_score(label.flatten(), pred.flatten())
+                    jaccard_scores.append(jac)
+                    
+                    precision = precision_score(label.flatten(), pred.flatten(), zero_division=1)
+                    recall = recall_score(label.flatten(), pred.flatten(), zero_division=1)
+                    f1 = f1_score(label.flatten(), pred.flatten(), zero_division=1)
+                    
+                    precision_scores.append(precision)
+                    recall_scores.append(recall)
+                    f1_scores.append(f1)
             
-            # Save results
-            for z in range(0, inputs_np.shape[2], inputs_np.shape[2]//5):  # Sample slices
-                plt.figure(figsize=(15, 5))
-                
-                plt.subplot(1, 3, 1)
-                plt.imshow(inputs_np[:, :, z], cmap='gray')
-                plt.title('Input CT')
-                plt.axis('off')
-                
-                plt.subplot(1, 3, 2)
-                plt.imshow(inputs_np[:, :, z], cmap='gray')
-                plt.imshow(labels_np[:, :, z], cmap='jet', alpha=0.3)
-                plt.title('Ground Truth')
-                plt.axis('off')
-                
-                plt.subplot(1, 3, 3)
-                plt.imshow(inputs_np[:, :, z], cmap='gray')
-                plt.imshow(outputs_np[:, :, z], cmap='jet', alpha=0.3)
-                plt.title('Prediction')
-                plt.axis('off')
-                
-                plt.savefig(f'{output_dir}/sample_{i}_slice_{z}.png')
-                plt.close()
-                
-
-def browse_ct_segmentation_colored(ct_volume, segmentation_volume):
-    """
-    Interactive CT visualization with segmentation overlay and a slider.
+            # Save visualization for a few samples
+            if i % 10 == 0:
+                for b in range(min(2, inputs.shape[0])):
+                    input_img = inputs_np[j, 0]  # [C, H, W] -> [H, W]
+                    label_img = labels_np[j, 0]
+                    pred_img = preds_np[j, 0]
+                    
+                    plt.figure(figsize=(15, 5))
+                    
+                    plt.subplot(1, 3, 1)
+                    plt.imshow(input_img, cmap='gray')
+                    plt.title('Input CT')
+                    plt.axis('off')
+                    
+                    plt.subplot(1, 3, 2)
+                    plt.imshow(input_img, cmap='gray')
+                    plt.imshow(label_img, cmap='jet', alpha=0.3)
+                    plt.title('Ground Truth')
+                    plt.axis('off')
+                    
+                    plt.subplot(1, 3, 3)
+                    plt.imshow(input_img, cmap='gray')
+                    plt.imshow(pred_img, cmap='jet', alpha=0.3)
+                    plt.title('Prediction')
+                    plt.axis('off')
+                    
+                    patient_id = batch['patient_id'][j]
+                    slice_idx = batch['slice_idx'][j].item()
+                    
+                    out_file = f"{output_dir}/patient_{patient_id}_slice_{slice_idx}.png"
+                    plt.savefig(out_file)
+                    plt.close()
     
-    Args:
-        ct_volume (np.ndarray): CT volume data.
-        segmentation_volume (np.ndarray): Segmentation mask data.
-    """
-    if ct_volume.ndim > 3:
-        while ct_volume.ndim > 3:
-            if ct_volume.shape[0] == 1:
-                ct_volume = ct_volume[0]
-            else:
-                break
+    avg_metrics = {
+        'dice_score': np.mean(dice_scores) if dice_scores else 0.0,
+        'jaccard_index': np.mean(jaccard_scores) if jaccard_scores else 0.0,
+        'precision': np.mean(precision_scores) if precision_scores else 0.0,
+        'recall': np.mean(recall_scores) if recall_scores else 0.0,
+        'f1_score': np.mean(f1_scores) if f1_scores else 0.0,
+        'samples_evaluated': len(dice_scores)
+    }
     
-    if segmentation_volume.ndim > 3:
-        while segmentation_volume.ndim > 3:
-            if segmentation_volume.shape[0] == 1:
-                segmentation_volume = segmentation_volume[0]
-            else:
-                break
+    print("\n===== Evaluation Metrics =====")
+    print(f"Dice Score: {avg_metrics['dice_score']:.4f}")
+    print(f"Jaccard Index (IoU): {avg_metrics['jaccard_index']:.4f}")
+    print(f"Precision: {avg_metrics['precision']:.4f}")
+    print(f"Recall: {avg_metrics['recall']:.4f}")
+    print(f"F1 Score: {avg_metrics['f1_score']:.4f}")
+    print(f"Samples evaluated: {avg_metrics['samples_evaluated']}")
+    print("=============================\n")
     
-    print(f"Wizualizacja - kształt CT: {ct_volume.shape}, kształt segmentacji: {segmentation_volume.shape}")
-    
-    fig, ax = plt.subplots(figsize=(10, 8))
-    plt.subplots_adjust(bottom=0.25)
-
-    slice_idx = ct_volume.shape[-1] // 2
-
-    cmap = mcolors.ListedColormap(['none', 'red', 'blue'])
-    norm = mcolors.BoundaryNorm(boundaries=[-0.5, 0.5, 1.5, 2.5], ncolors=3)
-
-    ct_img = ax.imshow(ct_volume[:, :, slice_idx], cmap="gray")
-    seg_img = ax.imshow(segmentation_volume[:, :, slice_idx], cmap=cmap, norm=norm, alpha=0.4)
-    ax.set_title(f'Przekrój {slice_idx}/{ct_volume.shape[-1]-1}')
-    ax.axis('off')
-
-    legend_elements = [
-        plt.Rectangle((0, 0), 1, 1, fc="white", ec="gray", lw=1),
-        plt.Rectangle((0, 0), 1, 1, fc="red", alpha=0.4),
-        plt.Rectangle((0, 0), 1, 1, fc="blue", alpha=0.4)
-    ]
-    ax.legend(legend_elements, ['Tło', 'Prawa nerka', 'Lewa nerka'], 
-              loc='lower center', bbox_to_anchor=(0.5, -0.15),
-              ncol=3, frameon=False)
-
-
-    ax_slider = plt.axes([0.2, 0.05, 0.6, 0.03])  # [left, bottom, width, height]
-    slider = Slider(ax_slider, 'Przekrój', 0, ct_volume.shape[-1] - 1, valinit=slice_idx, valfmt='%0.0f')
-
-
-    def update(val):
-        idx = int(slider.val)
-        ct_img.set_data(ct_volume[:, :, idx])
-        seg_img.set_data(segmentation_volume[:, :, idx])
-        ax.set_title(f'Przekrój {idx}/{ct_volume.shape[-1]-1}')
-        fig.canvas.draw_idle()
-
-    slider.on_changed(update)
-
-    plt.show()
+    return avg_metrics

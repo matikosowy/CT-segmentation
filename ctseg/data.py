@@ -22,7 +22,8 @@ class Kidneys2dDataset(Dataset):
         min_kidney_mask_pixels=50,
         split=None,
     ):
-        """Dataset class for 2d slice-wise kidney segmentation.
+        """
+        Dataset class for 2d slice-wise kidney segmentation.
         This class loads CT slices and their corresponding kidney masks, applying
         transformations if provided. It filters out slices where the kidney mask
         has fewer than `min_kidney_mask_pixels` pixels.
@@ -44,6 +45,8 @@ class Kidneys2dDataset(Dataset):
     def _load_data(self):
         """Load and process CT slices meeting kidney mask criteria."""
         skipped_slices = 0
+        
+        print("=" * 50)
         
         for patient_dir in tqdm(self.patient_dirs, desc=f"Loading {self.split} patients"):
             image_path = patient_dir / "ct.nii.gz"
@@ -105,6 +108,7 @@ class Kidneys2dDataset(Dataset):
             'image': image,
             'mask': mask,
             'patient_id': sample['patient_id'],
+            'slice_idx': sample['slice_idx'],
         }
 
 
@@ -135,6 +139,8 @@ def create_kidney_dataloaders(
     Returns:
         tuple: Tuple of DataLoader objects for train, val, and test splits.
     """
+    print("DATA PROCESSING")
+    
     root_dir = Path(root_dir)
     patient_dirs = [d for d in root_dir.iterdir() if d.is_dir()]
     
@@ -151,6 +157,8 @@ def create_kidney_dataloaders(
     )
     
     val_size = int(len(train_val_patients) * val_ratio / (1 - test_ratio))
+    val_size = min(val_size, 10) # Limit to 10 patients for validation (speed up training)
+    
     train_patients, val_patients = train_test_split(
         train_val_patients, test_size=val_size, random_state=seed
     )
