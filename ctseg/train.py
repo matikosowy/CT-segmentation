@@ -5,16 +5,14 @@ This module contains the training loop for the 2D U-Net model used for kidney se
 It includes functions for training, validation, and visualization of the training process.
 """
 
-from monai.losses import DiceCELoss
-from torch.optim import Adam
-from tqdm import tqdm
-import torch
-import matplotlib.pyplot as plt
-
-from sklearn.metrics import jaccard_score
 from datetime import datetime
 
-from torch.amp import autocast, GradScaler
+import torch
+from tqdm import tqdm
+from torch.optim import Adam
+from monai.losses import DiceCELoss
+from sklearn.metrics import jaccard_score
+from torch.amp import GradScaler, autocast
 
 
 def train_unet_2d(
@@ -26,6 +24,7 @@ def train_unet_2d(
     lr=1e-4,
     run_dir=datetime.now().strftime("%Y%m%d_%H%M%S"),
     weight_decay=1e-5,
+    early_stopping_patience=8,
     optimizer=None,
     scheduler=None,
     start_epoch=0,
@@ -33,7 +32,7 @@ def train_unet_2d(
     history=None,
 ):
     """
-    Train the 2D U-Net model for kidney segmentation. 
+    Train the 2D U-Net model for kidney segmentation.
     This function handles the training loop, validation, and saving of the best model based on the Dice score.
 
     Args:
@@ -45,6 +44,8 @@ def train_unet_2d(
         lr (float, optional): Learning rate for the optimizer. Defaults to 1e-4.
         run_dir (str, Path, optional): Directory to save the model and training logs. Defaults to current date and time.
         weight_decay (float, optional): Weight decay for the optimizer. Defaults to 1e-5.
+        early_stopping_patience (int, optional): Number of epochs to wait for improvement before stopping training.
+            Defaults to 8.
         optimizer (torch.optim.Optimizer, optional): Optimizer for training. Defaults to Adam.
         scheduler (torch.optim.lr_scheduler, optional): Learning rate scheduler. Defaults to ReduceLROnPlateau.
         start_epoch (int, optional): Epoch to start training from. Defaults to 0.
@@ -55,179 +56,181 @@ def train_unet_2d(
         model (nn.Module): Trained model.
         history (dict): Dictionary containing training and validation loss, Dice score, and Jaccard index.
     """
-    
+
     loss_fn = DiceCELoss(
-        to_onehot_y=False,  
-        sigmoid=True,  
-        squared_pred=False,  
+        to_onehot_y=False,
+        sigmoid=True,
+        squared_pred=False,
         include_background=True,
-        lambda_ce=0.5,  
+        lambda_ce=0.5,
     )
-    
+
     if optimizer is None:
         optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     scaler = GradScaler()
-    
+
     if scheduler is None:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5
-        )
-    
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
+
     best_dice = 0.0 if best_dice is None else best_dice
-    
+
     if history is None:
         train_losses, val_losses = [], []
         dice_scores, jaccard_scores = [], []
     else:
-        train_losses = history['train_loss']
-        val_losses = history['val_loss']
-        dice_scores = history['dice_score']
-        jaccard_scores = history['jaccard_score']
-        
-    early_stopping_patience = 5
+        train_losses = history["train_loss"]
+        val_losses = history["val_loss"]
+        dice_scores = history["dice_score"]
+        jaccard_scores = history["jaccard_score"]
+
     early_stopping_counter = 0
 
     print("=" * 30)
     print("TRAINING")
+    print("First epoch may take a bit longer...")
+
     for epoch in range(epochs):
         model.train()
         epoch_train_loss = 0.0
         progress_bar = tqdm(train_loader, desc=f"Epoch {start_epoch+epoch+1}/{start_epoch+epochs} [Train]")
-        
+
         for batch in progress_bar:
-            images = batch['image'].to(device)
-            masks = batch['mask'].to(device)
-            
+            images = batch["image"].to(device)
+            masks = batch["mask"].to(device)
+
             # Add channel dimension if needed
             if masks.ndim == 3:
                 masks = masks.unsqueeze(1)
-            
+
             optimizer.zero_grad()
-            
-            with autocast(device_type='cuda', dtype=torch.float16):
+
+            with autocast(device_type="cuda", dtype=torch.float16):
                 outputs = model(images)
                 loss = loss_fn(outputs, masks)
-                 
+
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
+
             scaler.step(optimizer)
             scaler.update()
-            
+
             epoch_train_loss += loss.item()
-            progress_bar.set_postfix({'loss': f"{loss.item():.4f}"})
+            progress_bar.set_postfix({"loss": f"{loss.item(): .4f}"})
 
         model.eval()
         epoch_val_loss = 0.0
         epoch_dice, epoch_jaccard = 0.0, 0.0
-   
+
         with torch.no_grad():
-            val_progress = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]")
-            
+            val_progress = tqdm(val_loader, desc=f"Epoch {start_epoch+epoch+1}/{start_epoch+epochs} [Val]")
+
             for batch in val_progress:
-                images = batch['image'].to(device)
-                masks = batch['mask'].to(device)
+                images = batch["image"].to(device)
+                masks = batch["mask"].to(device)
                 masks_np = masks.cpu().numpy()
-                
+
                 # Add channel dimension if needed
                 if masks.ndim == 3:
                     masks = masks.unsqueeze(1)
-                
+
                 outputs = model(images)
                 loss = loss_fn(outputs, masks)
-                        
+
                 epoch_val_loss += loss.item()
-                
+
                 preds = torch.sigmoid(outputs)
                 preds_np = (preds > 0.5).float().cpu().numpy()
-                
+
                 dice = 0.0
                 jaccard = 0.0
                 count = 0
-    
+
                 for pred, mask in zip(preds_np, masks_np):
                     # Ensure pred and mask are 2D
                     if pred.ndim > 2:
                         pred = pred.squeeze()
-                        
+
                     if mask.ndim > 2:
                         mask = mask.squeeze()
-                     
+
                     if mask.sum() > 0:
                         dice_val = 2 * (pred * mask).sum() / (pred.sum() + mask.sum() + 1e-8)
                         dice += dice_val
                         jac_val = jaccard_score(mask.flatten(), pred.flatten())
                         jaccard += jac_val
                         count += 1
-                
+
                 if count > 0:
                     epoch_dice += dice / count
                     epoch_jaccard += jaccard / count
-        
-        scheduler.step(avg_val_loss)
-                    
+
         n_train_batches = max(1, len(train_loader))
         n_val_batches = max(1, len(val_loader))
         avg_train_loss = epoch_train_loss / n_train_batches
         avg_val_loss = epoch_val_loss / n_val_batches
         avg_dice = epoch_dice / n_val_batches
         avg_jaccard = epoch_jaccard / n_val_batches
-        
+
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
         dice_scores.append(avg_dice)
         jaccard_scores.append(avg_jaccard)
 
-        print(f"\nEpoch {epoch+1}/{epochs} summary:")
-        print(f"LR: {scheduler.get_last_lr()[0]:.6f}")
-        print(f"Train Loss: {avg_train_loss:.4f}")
-        print(f"Val Loss: {avg_val_loss:.4f}")
-        print(f"Dice Score: {avg_dice:.4f}")
-        print(f"Jaccard Index: {avg_jaccard:.4f}")
+        print(f"\nEpoch {start_epoch+epoch+1}/{start_epoch+epochs} summary: ")
+        print(f"LR: {scheduler.get_last_lr()[0]: .6f}")
+        print(f"Train Loss: {avg_train_loss: .4f}")
+        print(f"Val Loss: {avg_val_loss: .4f}")
+        print(f"Dice Score: {avg_dice: .4f}")
+        print(f"Jaccard Index: {avg_jaccard: .4f}")
         print("-" * 50)
-        
+
         if avg_dice > best_dice:
             best_dice = avg_dice
-            
+
             checkpoint = {
-                'epoch': start_epoch+epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_dice': best_dice,
-                'history': {
-                    'train_loss': train_losses,
-                    'val_loss': val_losses,
-                    'dice_score': dice_scores,
-                    'jaccard_score': jaccard_scores
-                }
+                "epoch": start_epoch + epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_dice": best_dice,
+                "history": {
+                    "train_loss": train_losses,
+                    "val_loss": val_losses,
+                    "dice_score": dice_scores,
+                    "jaccard_score": jaccard_scores,
+                },
             }
-            
+
             torch.save(checkpoint, run_dir / "best_model.pth")
-            print(f"\nNew best model saved (Dice: {best_dice:.4f})")
-            
+            print(f"\nNew best model saved (Dice: {best_dice: .4f})")
+
             early_stopping_counter = 0
         else:
             early_stopping_counter += 1
-            
+
             if early_stopping_counter >= early_stopping_patience:
-                print(f"Early stopping triggered after {early_stopping_patience} epochs without validation improvement.")
+                print(f"Early stopping triggered!\n({early_stopping_patience} epochs without improvement)")
                 break
 
+        scheduler.step(avg_val_loss)
+        if scheduler.get_last_lr()[0] < 1e-6:
+            print("LR too low, stopping training!")
+            break
+
     history = {
-        'train_loss': train_losses,
-        'val_loss': val_losses,
-        'dice_score': dice_scores,
-        'jaccard_score': jaccard_scores
+        "train_loss": train_losses,
+        "val_loss": val_losses,
+        "dice_score": dice_scores,
+        "jaccard_score": jaccard_scores,
     }
-    
+
     # Label best model metrics (empty directory's name)
-    temp = run_dir / f"dice-{best_dice:.4f}"
+    temp = run_dir / f"dice-{best_dice: .4f}"
     temp.mkdir(parents=True, exist_ok=True)
 
-    print(f"Training completed!")
+    print("Training completed!")
     return model, history
 
 
@@ -245,7 +248,7 @@ def resume_training_2d(
     """
     Resume training from a checkpoint.
     This function loads the model and optimizer state from a checkpoint file and continues training.
-    
+
     Args:
         checkpoint (str): Path to the checkpoint file.
         model (nn.Module): Model's architecture.
@@ -261,20 +264,18 @@ def resume_training_2d(
         model (nn.Module): Trained model.
         history (dict): Dictionary containing training and validation loss, Dice score, and Jaccard index.
     """
-    
+
     optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
-    )
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    
-    model.load_state_dict(checkpoint['model_state_dict']).to(device)
-    start_epoch = checkpoint['epoch'] + 1
-    best_dice = checkpoint['best_dice']
-    history = checkpoint['history']
-    
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
+    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    start_epoch = checkpoint["epoch"] + 1
+    best_dice = checkpoint["best_dice"]
+    history = checkpoint["history"]
+
     model, history = train_unet_2d(
         model=model,
         epochs=epochs,
@@ -290,5 +291,5 @@ def resume_training_2d(
         best_dice=best_dice,
         history=history,
     )
-    
+
     return model, history

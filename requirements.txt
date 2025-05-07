@@ -1,0 +1,9 @@
+albumentations
+matplotlib
+monai
+nibabel
+numpy
+pathlib
+scikit-learn
+torch
+tqdm
