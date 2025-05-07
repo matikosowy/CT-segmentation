@@ -12,6 +12,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from sklearn.metrics import jaccard_score
+from datetime import datetime
 
 from torch.amp import autocast, GradScaler
 
@@ -23,9 +24,27 @@ def train_unet_2d(
     val_loader,
     device,
     lr=1e-4,
-    save_path="unet2d_model.pth",
+    run_dir=datetime.now().strftime("%Y%m%d_%H%M%S"),
     weight_decay=1e-5
 ):
+    """
+    Train the 2D U-Net model for kidney segmentation. 
+    This function handles the training loop, validation, and saving of the best model based on the Dice score.
+
+    Args:
+        model (nn.Module): _description_
+        epochs (int): Number of training epochs.
+        train_loader (DataLoader): DataLoader for training data.
+        val_loader (DataLoader): DataLoader for validation data.
+        device (torch.device): Device to run the model on (CPU or GPU).
+        lr (float, optional): Learning rate for the optimizer. Defaults to 1e-4.
+        run_dir (str, Path, optional): Directory to save the model and training logs. Defaults to current date and time.
+        weight_decay (float, optional): Weight decay for the optimizer. Defaults to 1e-5.
+
+    Returns:
+        model (nn.Module): Trained model.
+        history (dict): Dictionary containing training and validation loss, Dice score, and Jaccard index.
+    """
     
     loss_fn = DiceCELoss(
         to_onehot_y=False,  
@@ -132,7 +151,7 @@ def train_unet_2d(
 
         if avg_dice > best_dice:
             best_dice = avg_dice
-            torch.save(model.state_dict(), save_path)
+            torch.save(model.state_dict(), run_dir / "best_model.pth")
             print(f"\nNew best model saved (Dice: {best_dice:.4f})")
 
         train_losses.append(avg_train_loss)
@@ -141,6 +160,7 @@ def train_unet_2d(
         jaccard_scores.append(avg_jaccard)
 
         print(f"\nEpoch {epoch+1}/{epochs}")
+        print(f"LR: {scheduler.get_last_lr()[0]:.6f}")
         print(f"Train Loss: {avg_train_loss:.4f}")
         print(f"Val Loss: {avg_val_loss:.4f}")
         print(f"Dice Score: {avg_dice:.4f}")
@@ -166,6 +186,9 @@ def train_unet_2d(
     plt.legend()
 
     plt.tight_layout()
+    
+    fig_path = run_dir / "train_plot.png"
+    plt.savefig(fig_path)
     plt.show()
     
     history = {
@@ -174,5 +197,9 @@ def train_unet_2d(
         'dice_score': dice_scores,
         'jaccard_score': jaccard_scores
     }
+    
+    # Label best model metrics
+    temp = run_dir / f"dice{best_dice:.4f}-loss{avg_val_loss:.4f}"
+    temp.mkdir(parents=True, exist_ok=True)
 
     return model, history
