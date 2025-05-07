@@ -19,8 +19,8 @@ def evaluate_model(model, test_loader, device, output_dir="evaluation_results"):
     Returns:
         dict: Dictionary containing evaluation metrics
     """
-    print("=" * 50)
-    print("Evaluating the model...")
+    print("=" * 30)
+    print("EVALUATION")
     model.eval()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

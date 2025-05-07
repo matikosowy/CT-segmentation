@@ -111,8 +111,9 @@ def main():
             out_channels=out_channels, 
             device=device,
         )
-           
-        run_dir = "runs" / Path(args.run_name)
+        
+        run_name = f"{args.model}_" + args.run_name
+        run_dir = "runs" / Path(run_name)
         run_dir.mkdir(parents=True, exist_ok=True)
         
         if args.resume:

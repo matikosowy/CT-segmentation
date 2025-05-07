@@ -84,9 +84,12 @@ def train_unet_2d(
         val_losses = history['val_loss']
         dice_scores = history['dice_score']
         jaccard_scores = history['jaccard_score']
+        
+    early_stopping_patience = 5
+    early_stopping_counter = 0
 
-    print("=" * 50)
-    print("Starting training...")
+    print("=" * 30)
+    print("TRAINING")
     for epoch in range(epochs):
         model.train()
         epoch_train_loss = 0.0
@@ -162,6 +165,8 @@ def train_unet_2d(
                 if count > 0:
                     epoch_dice += dice / count
                     epoch_jaccard += jaccard / count
+        
+        scheduler.step(avg_val_loss)
                     
         n_train_batches = max(1, len(train_loader))
         n_val_batches = max(1, len(val_loader))
@@ -170,8 +175,19 @@ def train_unet_2d(
         avg_dice = epoch_dice / n_val_batches
         avg_jaccard = epoch_jaccard / n_val_batches
         
-        scheduler.step(avg_val_loss)
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        dice_scores.append(avg_dice)
+        jaccard_scores.append(avg_jaccard)
 
+        print(f"\nEpoch {epoch+1}/{epochs} summary:")
+        print(f"LR: {scheduler.get_last_lr()[0]:.6f}")
+        print(f"Train Loss: {avg_train_loss:.4f}")
+        print(f"Val Loss: {avg_val_loss:.4f}")
+        print(f"Dice Score: {avg_dice:.4f}")
+        print(f"Jaccard Index: {avg_jaccard:.4f}")
+        print("-" * 50)
+        
         if avg_dice > best_dice:
             best_dice = avg_dice
             
@@ -191,20 +207,15 @@ def train_unet_2d(
             
             torch.save(checkpoint, run_dir / "best_model.pth")
             print(f"\nNew best model saved (Dice: {best_dice:.4f})")
+            
+            early_stopping_counter = 0
+        else:
+            early_stopping_counter += 1
+            
+            if early_stopping_counter >= early_stopping_patience:
+                print(f"Early stopping triggered after {early_stopping_patience} epochs without validation improvement.")
+                break
 
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
-        dice_scores.append(avg_dice)
-        jaccard_scores.append(avg_jaccard)
-
-        print(f"\nEpoch {epoch+1}/{epochs}")
-        print(f"LR: {scheduler.get_last_lr()[0]:.6f}")
-        print(f"Train Loss: {avg_train_loss:.4f}")
-        print(f"Val Loss: {avg_val_loss:.4f}")
-        print(f"Dice Score: {avg_dice:.4f}")
-        print(f"Jaccard Index: {avg_jaccard:.4f}")
-        print("-" * 50)
-    
     history = {
         'train_loss': train_losses,
         'val_loss': val_losses,
@@ -213,7 +224,7 @@ def train_unet_2d(
     }
     
     # Label best model metrics (empty directory's name)
-    temp = run_dir / f"dice{best_dice:.4f}-loss{avg_val_loss:.4f}"
+    temp = run_dir / f"dice-{best_dice:.4f}"
     temp.mkdir(parents=True, exist_ok=True)
 
     print(f"Training completed!")
