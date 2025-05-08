@@ -21,7 +21,7 @@ def evaluate_model(model, test_loader, device, output_dir="evaluation_results"):
         dict: Dictionary containing evaluation metrics
     """
     print("=" * 30)
-    print("EVALUATION - please wait... (0% for a while)")
+    print("EVALUATION - please wait... (0% for a while is normal)")
     model.eval()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

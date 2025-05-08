@@ -168,6 +168,9 @@ def create_kidney_dataloaders(
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
+            A.ShiftScaleRotate(p=0.3, shift_limit=0.1, scale_limit=0.1, rotate_limit=15),
+            A.GaussNoise(p=0.2),
+            A.GridDistortion(p=0.2),
             ToTensorV2(),
         ]
     )

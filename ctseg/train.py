@@ -23,7 +23,7 @@ def train_unet_2d(
     device,
     lr=1e-4,
     run_dir=datetime.now().strftime("%Y%m%d_%H%M%S"),
-    weight_decay=1e-5,
+    weight_decay=1e-4,
     early_stopping_patience=8,
     optimizer=None,
     scheduler=None,
@@ -88,7 +88,7 @@ def train_unet_2d(
 
     print("=" * 30)
     print("TRAINING")
-    print("First epoch may take a bit longer... (0% for a while)")
+    print("First epoch may take a bit longer... (0% for a while is normal)")
 
     for epoch in range(epochs):
         model.train()
@@ -204,19 +204,19 @@ def train_unet_2d(
             }
 
             torch.save(checkpoint, run_dir / "best_model.pth")
-            print(f"\nNew best model saved (Dice: {best_dice: .4f})")
+            print(f"New best model saved (Dice: {best_dice: .4f})\n")
 
             early_stopping_counter = 0
         else:
             early_stopping_counter += 1
 
             if early_stopping_counter >= early_stopping_patience:
-                print(f"Early stopping triggered!\n({early_stopping_patience} epochs without improvement)")
+                print(f"Early stopping triggered!\n({early_stopping_patience} epochs without improvement)\n")
                 break
 
         scheduler.step(avg_val_loss)
         if scheduler.get_last_lr()[0] < 1e-6:
-            print("LR too low, stopping training!")
+            print("LR too low, stopping training!\n")
             break
 
     history = {
@@ -227,7 +227,7 @@ def train_unet_2d(
     }
 
     # Write the best dice score to a .txt file (as a marker/label)
-    file_name = run_dir / f"DICE_{best_dice}.txt"
+    file_name = run_dir / f"DICE_{best_dice: .4f}.txt"
     with open(file_name, "w") as f:
         f.write("")
 

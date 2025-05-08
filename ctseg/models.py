@@ -66,7 +66,7 @@ def create_segresnet_2d_model(
     use_conv_final=True,
     blocks_down=(1, 2, 2, 4),
     blocks_up=(1, 1, 1),
-    dropout_prob=0.1,
+    dropout_prob=0.2,
 ):
     """
     Create an optimized SegResNet model to outperform UNet.
