@@ -11,7 +11,7 @@ import torch
 
 from ctseg.eval import plot_history, evaluate_model
 from ctseg.data import create_2d_segmentation_dataloaders
-from ctseg.train import train_unet_2d, resume_training_2d
+from ctseg.train import train_2d_model, resume_training_2d
 from ctseg.models import create_unet_2d_model, create_segresnet_2d_model
 
 
@@ -107,19 +107,10 @@ def main():
         default=0.0,
         help="Weight decay for optimizer",
     )
-    parser.add_argument(
-        "--organ_weights",
-        nargs="+",
-        type=int,
-        default=[1.0, 1.0, 3.0, 3.0],
-        help="Weights for each organ in the loss function",
-    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nUsing device: {device}\n")
-
-    organ_weights = torch.tensor(args.organ_weights, device=device)
 
     if args.mode == "2d":
         # if args.reset_cache:
@@ -201,13 +192,12 @@ def main():
                 lr=args.lr,
                 run_dir=run_dir,
                 weight_decay=args.weight_decay,
-                organ_weights=organ_weights,
             )
 
         else:
             print("=" * 50)
             print("Training model from scratch...")
-            model, history = train_unet_2d(
+            model, history = train_2d_model(
                 model=model,
                 epochs=args.epochs,
                 train_loader=train_loader,
@@ -216,7 +206,6 @@ def main():
                 lr=args.lr,
                 run_dir=run_dir,
                 weight_decay=args.weight_decay,
-                organ_weights=organ_weights,
             )
 
         # Clean up after training

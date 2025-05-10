@@ -15,7 +15,7 @@ from sklearn.metrics import jaccard_score
 from torch.amp import GradScaler, autocast
 
 
-def train_unet_2d(
+def train_2d_model(
     model,
     epochs,
     train_loader,
@@ -30,7 +30,6 @@ def train_unet_2d(
     start_epoch=0,
     best_dice=0.0,
     history=None,
-    organ_weights=None,
 ):
     """
     Train the 2D U-Net model for kidney segmentation.
@@ -52,24 +51,17 @@ def train_unet_2d(
         start_epoch (int, optional): Epoch to start training from. Defaults to 0.
         best_dice (float, optional): Best Dice score achieved so far. Defaults to 0.0.
         history (dict, optional): Dictionary to store training and validation metrics. Defaults to None.
-        organ_weights (torch.tensor): Weights for each organ in the loss function. Defaults to None.
 
     Returns:
         model (nn.Module): Trained model.
         history (dict): Dictionary containing training and validation loss, Dice score, and Jaccard index.
     """
 
-    target_organs = train_loader.dataset.target_organs
-    assert len(organ_weights) == len(target_organs), (
-        f"Organ weights and target organs mismatch, got: " f"{len(organ_weights)} and {len(target_organs)}."
-    )
-
     loss_fn = DiceCELoss(
         to_onehot_y=False,
         sigmoid=True,
         include_background=True,
         lambda_ce=0.5,
-        weight=organ_weights,
     )
 
     if optimizer is None:
@@ -267,7 +259,6 @@ def resume_training_2d(
     lr=1e-4,
     run_dir=datetime.now().strftime("%Y%m%d_%H%M%S"),
     weight_decay=1e-5,
-    organ_weights=None,
 ):
     """
     Resume training from a checkpoint.
@@ -300,7 +291,7 @@ def resume_training_2d(
     best_dice = checkpoint["best_dice"]
     history = checkpoint["history"]
 
-    model, history = train_unet_2d(
+    model, history = train_2d_model(
         model=model,
         epochs=epochs,
         train_loader=train_loader,
@@ -314,7 +305,6 @@ def resume_training_2d(
         start_epoch=start_epoch,
         best_dice=best_dice,
         history=history,
-        organ_weights=organ_weights,
     )
 
     return model, history
