@@ -173,7 +173,12 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# My own
+# Directories to ignore
 CT
-todo.txt
-test.py
+dataset
+runs
+cache
+
+# Files to ignore
+*.csv
+*.pth

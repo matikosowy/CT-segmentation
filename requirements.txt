@@ -1,0 +1,8 @@
+albumentations==2.0.6
+matplotlib==3.10.0
+monai==1.4.0
+nibabel==5.3.2
+numpy==1.25.0
+scikit-learn==1.6.1
+torch==2.3.0
+tqdm==4.67.1

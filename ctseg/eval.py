@@ -1,187 +1,324 @@
-import os
+from pathlib import Path
+
 import torch
 import numpy as np
-import nibabel as nib
+from tqdm import tqdm
 import matplotlib.pyplot as plt
-from pathlib import Path
-from monai.inferers import sliding_window_inference
-from monai.transforms import DivisiblePad
-from matplotlib.widgets import Slider
-from matplotlib import colors as mcolors
+from sklearn.metrics import f1_score, recall_score, jaccard_score, precision_score
 
 
-def inference_on_new_data(model, image_path, device, output_path='segmentation_result.nii.gz'):
+def evaluate_model(model, test_loader, device, output_dir="evaluation_results", organ_names=None):
     """
-    Perform inference on a new CT image.
-    
+    Evaluate the model on the test set, print metrics and save visualization results.
+
     Args:
-        model (nn.Module): Trained model.
-        image_path (str): Path to the CT image (NIFTI format).
-        device (torch.device): Computation device.
-        output_path (str): Path to save the segmentation result.
-    
-    Returns:
-        tuple: Original image and segmentation result as numpy arrays.
+        model: The trained segmentation model
+        test_loader: DataLoader with test data
+        device: Device to run inference on
+        output_dir: Directory to save results
+        organ_names: List of organ names corresponding to mask channels
     """
-    image_data = nib.load(image_path).get_fdata()
-    original_shape = image_data.shape
-    
-    image_data = np.expand_dims(image_data, axis=(0, 1))  # Add batch and channel dims
-    image_tensor = torch.from_numpy(image_data.astype(np.float32)).to(device)
-    
-    affine = nib.load(image_path).affine
-    
-    image_tensor = (image_tensor - image_tensor.min()) / (image_tensor.max() - image_tensor.min())
-    
-    # Remove batch dimension for padding
-    image_tensor = image_tensor.squeeze(0)
-    
-    # Pad for network
-    padder = DivisiblePad(k=16)
-    image_tensor_padded = padder(image_tensor)
-    
-    # Add batch dimension back
-    image_tensor_padded = image_tensor_padded.unsqueeze(0)
-    
-    print(f"Original shape: {image_tensor.shape}, Padded shape: {image_tensor_padded.shape}")
-    
-    # Inference
+    print("=" * 30)
+    print("EVALUATION - please wait... (0% for a while is normal)")
     model.eval()
-    with torch.no_grad():
-        output = sliding_window_inference(
-            image_tensor_padded, roi_size=(128, 128, 128), sw_batch_size=1, predictor=model, overlap=0.5
-        )
-        pred = output.argmax(dim=1).cpu().numpy().squeeze()
-    
-    # Remove padding
-    pred = pred[
-        :original_shape[0],
-        :original_shape[1],
-        :original_shape[2]
-    ]
-    
-    nib.save(nib.Nifti1Image(pred.astype(np.uint8), affine), output_path)
-    print(f"Segmentation saved to {output_path}")
-    
-    return image_data.squeeze(), pred
-
-
-def evaluate_model(model, val_loader, device, output_dir="evaluation_results"):
-    """
-    Evaluate model performance on the validation set and save visualizations.
-    
-    Args:
-        model (nn.Module): Trained model.
-        val_loader (DataLoader): Validation data loader.
-        device (torch.device): Computation device.
-        output_dir (str): Directory to save results.
-    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-   
-    model.eval()
-    
+
+    organ_metrics = {}
+    num_organs = None
+
+    # Get organs' names
+    if organ_names is None and hasattr(test_loader.dataset, "target_organs"):
+        organ_names = test_loader.dataset.target_organs
+
     with torch.no_grad():
-        for i, batch_data in enumerate(val_loader):
-            if i >= 3:  # Evaluate only first 3 samples
-                break
-            
-            inputs = batch_data["image"].to(device)
-            labels = batch_data["label"].to(device)
-            
-            # Make prediction with sliding window
-            outputs = sliding_window_inference(
-                inputs, roi_size=(128, 128, 128), sw_batch_size=1, predictor=model, overlap=0.5
-            )
-            
-            # Convert to numpy arrays
-            inputs_np = inputs.cpu().numpy()[0, 0]  # [B, C, H, W, D] -> [H, W, D]
-            labels_np = labels.cpu().numpy()[0, 0]  # [B, C, H, W, D] -> [H, W, D]
-            outputs_np = outputs.argmax(dim=1).cpu().numpy()[0]  # [B, C, H, W, D] -> [H, W, D]
-            
-            # Save results
-            for z in range(0, inputs_np.shape[2], inputs_np.shape[2]//5):  # Sample slices
-                plt.figure(figsize=(15, 5))
-                
-                plt.subplot(1, 3, 1)
-                plt.imshow(inputs_np[:, :, z], cmap='gray')
-                plt.title('Input CT')
-                plt.axis('off')
-                
-                plt.subplot(1, 3, 2)
-                plt.imshow(inputs_np[:, :, z], cmap='gray')
-                plt.imshow(labels_np[:, :, z], cmap='jet', alpha=0.3)
-                plt.title('Ground Truth')
-                plt.axis('off')
-                
-                plt.subplot(1, 3, 3)
-                plt.imshow(inputs_np[:, :, z], cmap='gray')
-                plt.imshow(outputs_np[:, :, z], cmap='jet', alpha=0.3)
-                plt.title('Prediction')
-                plt.axis('off')
-                
-                plt.savefig(f'{output_dir}/sample_{i}_slice_{z}.png')
-                plt.close()
-                
+        for i, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
+            inputs = batch["image"].to(device)
+            labels = batch["mask"].to(device)
 
-def browse_ct_segmentation_colored(ct_volume, segmentation_volume):
+            if num_organs is None:
+                if labels.dim() == 4:  # [B, C, H, W]
+                    num_organs = labels.size(1)
+                else:  # [B, H, W]
+                    num_organs = 1
+
+                for o in range(num_organs):
+                    organ_metrics[o] = {
+                        "dice_scores": [],
+                        "jaccard_scores": [],
+                        "precision_scores": [],
+                        "recall_scores": [],
+                        "f1_scores": [],
+                    }
+
+            outputs = model(inputs)
+            preds = torch.sigmoid(outputs)
+            preds_binary = (preds > 0.5).float()
+
+            inputs_np = inputs.cpu().numpy()
+            labels_np = labels.cpu().numpy()
+            preds_np = preds_binary.cpu().numpy()
+
+            # Evaluate each sample in the batch
+            for j in range(inputs.shape[0]):
+                # For each organ channel
+                for o in range(num_organs):
+                    if labels.dim() == 4:  # [B, C, H, W]
+                        pred = preds_np[j, o]
+                        label = labels_np[j, o]
+                    else:  # Single organ case
+                        pred = preds_np[j, 0]
+                        label = labels_np[j, 0]
+
+                    if label.sum() > 0:
+                        dice = 2 * (pred * label).sum() / (pred.sum() + label.sum() + 1e-8)
+                        organ_metrics[o]["dice_scores"].append(dice)
+
+                        jac = jaccard_score(label.flatten(), pred.flatten())
+                        organ_metrics[o]["jaccard_scores"].append(jac)
+
+                        precision = precision_score(label.flatten(), pred.flatten(), zero_division=1)
+                        recall = recall_score(label.flatten(), pred.flatten(), zero_division=1)
+                        f1 = f1_score(label.flatten(), pred.flatten(), zero_division=1)
+
+                        organ_metrics[o]["precision_scores"].append(precision)
+                        organ_metrics[o]["recall_scores"].append(recall)
+                        organ_metrics[o]["f1_scores"].append(f1)
+
+            # Visualize a few samples
+            if i % 10 == 0:
+                for j in range(min(2, inputs.shape[0])):
+                    input_img = inputs_np[j, 0]  # CT image
+
+                    # Ground truth and prediction
+                    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+                    for idx, (ax_title, data_source) in enumerate(
+                        [
+                            ("Ground Truth", labels_np),
+                            ("Prediction", preds_np),
+                        ]
+                    ):
+                        axes[idx].imshow(input_img, cmap="gray")
+                        colors = plt.cm.tab10(np.linspace(0, 1, num_organs))
+
+                        proxies = []
+                        organ_labels = []
+
+                        for o in range(num_organs):
+                            if labels.dim() == 4:  # [B, C, H, W]
+                                mask = data_source[j, o]
+                            else:  # [B, H, W]
+                                mask = data_source[j, 0]
+
+                            organ_name = organ_names[o] if organ_names and o < len(organ_names) else f"organ_{o}"
+
+                            colored_mask = np.zeros((*mask.shape, 4))
+                            colored_mask[mask > 0.5, :] = colors[o % len(colors)]
+                            colored_mask[mask > 0.5, 3] = 0.5
+
+                            axes[idx].imshow(colored_mask, interpolation="none")
+
+                            if mask.sum() > 0:
+                                proxy = plt.Rectangle((0, 0), 1, 1, fc=colors[o % len(colors)])
+                                proxies.append(proxy)
+                                organ_labels.append(organ_name)
+
+                        if proxies:
+                            axes[idx].legend(proxies, organ_labels, loc="upper right")
+
+                        axes[idx].set_title(ax_title)
+                        axes[idx].axis("off")
+                        axes[idx].set_aspect("equal")
+
+                    patient_id = batch["patient_id"][j] if "patient_id" in batch else f"sample_{i}_{j}"
+                    try:
+                        slice_idx = batch["slice_idx"][j].item() if "slice_idx" in batch else f"slice_{i}_{j}"
+                    except (AttributeError, TypeError):
+                        slice_idx = f"slice_{i}_{j}"
+
+                    out_file = output_dir / f"patient_{patient_id}_slice_{slice_idx}_combined.png"
+                    plt.savefig(out_file)
+                    plt.close()
+
+    # Calculate average metrics for each organ and overall
+    avg_metrics = {}
+    overall_dice = []
+    overall_jaccard = []
+    overall_precision = []
+    overall_recall = []
+    overall_f1 = []
+    samples_evaluated = 0
+
+    # Print metrics for each organ and collect overall statistics
+    print("\n===== Evaluation Metrics =====")
+    for o in range(num_organs):
+        organ_name = organ_names[o] if organ_names and o < len(organ_names) else f"organ_{o}"
+
+        organ_dice = np.mean(organ_metrics[o]["dice_scores"]) if organ_metrics[o]["dice_scores"] else 0.0
+        organ_jaccard = np.mean(organ_metrics[o]["jaccard_scores"]) if organ_metrics[o]["jaccard_scores"] else 0.0
+
+        organ_precision = np.mean(organ_metrics[o]["precision_scores"]) if organ_metrics[o]["precision_scores"] else 0.0
+        organ_recall = np.mean(organ_metrics[o]["recall_scores"]) if organ_metrics[o]["recall_scores"] else 0.0
+        organ_f1 = np.mean(organ_metrics[o]["f1_scores"]) if organ_metrics[o]["f1_scores"] else 0.0
+        organ_samples = len(organ_metrics[o]["dice_scores"])
+
+        print(f"{organ_name}: ")
+        print(f"  Dice Score: {organ_dice: .4f}")
+        print(f"  Jaccard Index (IoU): {organ_jaccard: .4f}")
+        print(f"  Precision: {organ_precision: .4f}")
+        print(f"  Recall: {organ_recall: .4f}")
+        print(f"  F1 Score: {organ_f1: .4f}")
+        print(f"  Samples evaluated: {organ_samples}")
+
+        overall_dice.extend(organ_metrics[o]["dice_scores"])
+        overall_jaccard.extend(organ_metrics[o]["jaccard_scores"])
+        overall_precision.extend(organ_metrics[o]["precision_scores"])
+        overall_recall.extend(organ_metrics[o]["recall_scores"])
+        overall_f1.extend(organ_metrics[o]["f1_scores"])
+        samples_evaluated += organ_samples
+
+    # Calculate overall metrics
+    avg_metrics = {
+        "dice_score": np.mean(overall_dice) if overall_dice else 0.0,
+        "jaccard_index": np.mean(overall_jaccard) if overall_jaccard else 0.0,
+        "precision": np.mean(overall_precision) if overall_precision else 0.0,
+        "recall": np.mean(overall_recall) if overall_recall else 0.0,
+        "f1_score": np.mean(overall_f1) if overall_f1 else 0.0,
+        "samples_evaluated": len(overall_dice),
+        "per_organ_metrics": organ_metrics,
+    }
+
+    print("\nOverall:")
+    print(f"  Dice Score: {avg_metrics['dice_score']: .4f}")
+    print(f"  Jaccard Index (IoU): {avg_metrics['jaccard_index']: .4f}")
+    print(f"  Precision: {avg_metrics['precision']: .4f}")
+    print(f"  Recall: {avg_metrics['recall']: .4f}")
+    print(f"  F1 Score: {avg_metrics['f1_score']: .4f}")
+    print(f"  Samples evaluated: {avg_metrics['samples_evaluated']}")
+    print("=============================\n")
+
+    # Save metrics to file
+    metrics_file = output_dir / "evaluation_metrics.txt"
+    with open(metrics_file, "w") as f:
+        f.write("===== Evaluation Metrics =====\n")
+        for o in range(num_organs):
+            organ_name = organ_names[o] if organ_names and o < len(organ_names) else f"organ_{o}"
+
+            organ_dice = np.mean(organ_metrics[o]["dice_scores"] or [0.0])
+            organ_jaccard = np.mean(organ_metrics[o]["jaccard_scores"] or [0.0])
+            organ_precision = np.mean(organ_metrics[o]["precision_scores"] or [0.0])
+            organ_recall = np.mean(organ_metrics[o]["recall_scores"] or [0.0])
+            organ_f1 = np.mean(organ_metrics[o]["f1_scores"] or [0.0])
+
+            f.write(f"\n{organ_name}: \n")
+            f.write(f"  Dice Score: {organ_dice: .4f}\n")
+            f.write(f"  Jaccard Index (IoU): {organ_jaccard: .4f}\n")
+            f.write(f"  Precision: {organ_precision: .4f}\n")
+            f.write(f"  Recall: {organ_recall: .4f}\n")
+            f.write(f"  F1 Score: {organ_f1: .4f}\n")
+
+        f.write("\nOverall:\n")
+        f.write(f"Dice Score: {avg_metrics['dice_score']: .4f}\n")
+        f.write(f"Jaccard Index (IoU): {avg_metrics['jaccard_index']: .4f}\n")
+        f.write(f"Precision: {avg_metrics['precision']: .4f}\n")
+        f.write(f"Recall: {avg_metrics['recall']: .4f}\n")
+        f.write(f"F1 Score: {avg_metrics['f1_score']: .4f}\n")
+        f.write(f"Samples evaluated: {avg_metrics['samples_evaluated']}\n")
+
+    return avg_metrics
+
+
+def plot_history(history, run_dir):
     """
-    Interactive CT visualization with segmentation overlay and a slider.
-    
+    Plot training and validation loss and metrics over epochs.
+
     Args:
-        ct_volume (np.ndarray): CT volume data.
-        segmentation_volume (np.ndarray): Segmentation mask data.
+        history (dict): Dictionary containing training history with keys:
+            - 'train_loss': List of training losses per epoch.
+            - 'val_loss': List of validation losses per epoch.
+            - 'dice_score': List of Dice scores per epoch.
+            - 'jaccard_score': List of Jaccard scores per epoch.
+        run_dir (str, Path): Directory to save the plot.
     """
-    if ct_volume.ndim > 3:
-        while ct_volume.ndim > 3:
-            if ct_volume.shape[0] == 1:
-                ct_volume = ct_volume[0]
-            else:
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    train_losses = history["train_loss"]
+    val_losses = history["val_loss"]
+    dice_scores = history["dice_score"]
+    jaccard_scores = history["jaccard_score"]
+
+    plt.figure(figsize=(15, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label="Train Loss")
+    plt.plot(val_losses, label="Val Loss")
+    plt.title("Loss Progression")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(dice_scores, label="Dice Score")
+    plt.plot(jaccard_scores, label="Jaccard Index")
+    plt.title("Validation Metrics")
+    plt.xlabel("Epoch")
+    plt.ylabel("Score")
+    plt.legend()
+
+    plt.tight_layout()
+
+    fig_path = run_dir / "train_plot.png"
+    plt.savefig(fig_path)
+    print(f"Training history plot saved at: {run_dir / 'train_plot.png'}")
+
+
+def visualize_samples(dataloader, num_samples=5):
+    """Visualize random samples from the dataset with both masks."""
+    plt.figure(figsize=(15, num_samples * 4))
+
+    samples_seen = 0
+    for batch in dataloader:
+        images = batch["image"].numpy()
+        masks = batch["mask"].numpy()
+
+        for i in range(len(images)):
+            if samples_seen >= num_samples:
                 break
-    
-    if segmentation_volume.ndim > 3:
-        while segmentation_volume.ndim > 3:
-            if segmentation_volume.shape[0] == 1:
-                segmentation_volume = segmentation_volume[0]
-            else:
-                break
-    
-    print(f"Wizualizacja - kształt CT: {ct_volume.shape}, kształt segmentacji: {segmentation_volume.shape}")
-    
-    fig, ax = plt.subplots(figsize=(10, 8))
-    plt.subplots_adjust(bottom=0.25)
 
-    slice_idx = ct_volume.shape[-1] // 2
+            img = images[i, 0]  # Get the first channel
+            mask_left = masks[i, 0]  # First channel - left kidney
+            mask_right = masks[i, 1]  # Second channel - right kidney
 
-    cmap = mcolors.ListedColormap(['none', 'red', 'blue'])
-    norm = mcolors.BoundaryNorm(boundaries=[-0.5, 0.5, 1.5, 2.5], ncolors=3)
+            # Skip if no kidneys in this slice
+            if mask_left.sum() < 10 and mask_right.sum() < 10:
+                continue
 
-    ct_img = ax.imshow(ct_volume[:, :, slice_idx], cmap="gray")
-    seg_img = ax.imshow(segmentation_volume[:, :, slice_idx], cmap=cmap, norm=norm, alpha=0.4)
-    ax.set_title(f'Przekrój {slice_idx}/{ct_volume.shape[-1]-1}')
-    ax.axis('off')
+            # Plot the sample
+            plt.subplot(num_samples, 3, samples_seen * 3 + 1)
+            plt.imshow(img, cmap="gray")
+            plt.title("CT Image")
+            plt.axis("off")
 
-    legend_elements = [
-        plt.Rectangle((0, 0), 1, 1, fc="white", ec="gray", lw=1),
-        plt.Rectangle((0, 0), 1, 1, fc="red", alpha=0.4),
-        plt.Rectangle((0, 0), 1, 1, fc="blue", alpha=0.4)
-    ]
-    ax.legend(legend_elements, ['Tło', 'Prawa nerka', 'Lewa nerka'], 
-              loc='lower center', bbox_to_anchor=(0.5, -0.15),
-              ncol=3, frameon=False)
+            plt.subplot(num_samples, 3, samples_seen * 3 + 2)
+            plt.imshow(img, cmap="gray")
+            plt.imshow(mask_left, alpha=0.5, cmap="Reds")
+            plt.title("Left Kidney")
+            plt.axis("off")
 
+            plt.subplot(num_samples, 3, samples_seen * 3 + 3)
+            plt.imshow(img, cmap="gray")
+            plt.imshow(mask_right, alpha=0.5, cmap="Blues")
+            plt.title("Right Kidney")
+            plt.axis("off")
 
-    ax_slider = plt.axes([0.2, 0.05, 0.6, 0.03])  # [left, bottom, width, height]
-    slider = Slider(ax_slider, 'Przekrój', 0, ct_volume.shape[-1] - 1, valinit=slice_idx, valfmt='%0.0f')
+            samples_seen += 1
 
+        if samples_seen >= num_samples:
+            break
 
-    def update(val):
-        idx = int(slider.val)
-        ct_img.set_data(ct_volume[:, :, idx])
-        seg_img.set_data(segmentation_volume[:, :, idx])
-        ax.set_title(f'Przekrój {idx}/{ct_volume.shape[-1]-1}')
-        fig.canvas.draw_idle()
-
-    slider.on_changed(update)
-
-    plt.show()
+    plt.tight_layout()
+    plt.savefig("kidney_samples_visualization.png")
+    plt.close()
+    print("Visualization saved as 'kidney_samples_visualization.png'")
