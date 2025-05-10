@@ -171,7 +171,7 @@ def main():
             )
 
         run_name = f"{args.model}{args.mode}_" + args.run_name
-        run_dir = "runs" / Path(run_name)
+        run_dir = Path("runs") / Path(run_name)
         run_dir.mkdir(parents=True, exist_ok=True)
 
         if args.resume:
