@@ -177,6 +177,7 @@ cython_debug/
 CT
 dataset
 runs
+cache
 
 # Files to ignore
 *.csv

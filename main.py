@@ -113,10 +113,6 @@ def main():
     print(f"\nUsing device: {device}\n")
 
     if args.mode == "2d":
-        # if args.reset_cache:
-        #     print("Resetting dataset cache...")
-        #     reset_dataset_cache()
-
         if args.inference:
             print("RUNNING INFERENCE ONLY...")
             assert args.checkpoint is not None, "Checkpoint path must be provided for inference!"
@@ -135,6 +131,7 @@ def main():
                 min_organ_pixels=args.min_organ_pixels,
                 target_organs=args.target_organs,
                 split="test",
+                reset_cache=args.reset_cache,
             )
 
             # Save predictions in the same directory as the checkpoint
@@ -157,6 +154,7 @@ def main():
             num_patients=args.num_patients,
             min_organ_pixels=args.min_organ_pixels,
             target_organs=args.target_organs,
+            reset_cache=args.reset_cache,
         )
 
         if args.model == "unet":

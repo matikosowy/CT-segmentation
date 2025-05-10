@@ -6,6 +6,7 @@ This module defines the dataset class and data loading functions for kidney segm
 
 from pathlib import Path
 
+import torch
 import numpy as np
 import nibabel as nib
 from tqdm import tqdm
@@ -23,6 +24,7 @@ class CT2dDataset(Dataset):
         min_organs_mask_pixels=[50, 50],
         transforms=None,
         split=None,
+        reset_cache=False,
     ):
         """
         Dataset class for 2d slice-wise kidney segmentation.
@@ -36,6 +38,7 @@ class CT2dDataset(Dataset):
             min_organs_mask_pixels (list): Minimum number of pixels in organ masks.
             transforms: Transformations to apply to the images and masks.
             split (str, optional): Split type ('train', 'val', 'test'). Defaults to None.
+            reset_cache (bool, optional): If True, reset the cache. Defaults to False.
         """
         self.patient_dirs = patient_dirs
         self.target_organs = target_organs_names
@@ -50,7 +53,20 @@ class CT2dDataset(Dataset):
                 Got {len(self.target_organs)} and {len(self.min_target_masks)}"""
             )
 
-        self._load_data()
+        num_patients = len(self.patient_dirs)
+        organs_str = "_".join(self.target_organs)
+        cache_path = Path(f"cache/cache_{self.split}_{num_patients}_{organs_str}.pt")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if cache_path.exists() and not reset_cache:
+            print(f"Loading cached {split} data from '{cache_path}'...")
+            self.samples = torch.load(cache_path)
+            print(f"Loaded {len(self.samples)} slices from cache.")
+            return
+        else:
+            print("Cache not found. Loading data...")
+            self._load_data()
+            self._cache_data(cache_path)
 
     def _load_data(self):
         """Load and process CT slices meeting kidney mask criteria."""
@@ -110,6 +126,11 @@ class CT2dDataset(Dataset):
         print(f"Skipped {skipped_slices} slices due to insufficient masks.")
         print(f"{self.split.capitalize()}: Loaded {len(self.samples)} slices from {len(self.patient_dirs)} patients.")
 
+    def _cache_data(self, cache_path):
+        """Cache the loaded data to a file."""
+        torch.save(self.samples, cache_path)
+        print(f"Data cached to '{cache_path}'.")
+
     def __len__(self):
         return len(self.samples)
 
@@ -147,6 +168,7 @@ def create_2d_segmentation_dataloaders(
     num_workers=4,
     target_organs=["kidney_left", "kidney_right"],
     min_organ_pixels=[50, 50],
+    reset_cache=False,
 ):
     """Creates DataLoader objects for training, validation, and testing of kidney segmentation.
 
@@ -161,6 +183,7 @@ def create_2d_segmentation_dataloaders(
         num_workers (int, optional): Number of workers for DataLoader. Defaults to 4.
         target_organs (list, optional): List of organs to segment. Defaults to ["kidney_left", "kidney_right"].
         min_organ_pixels (list, optional): Minimum number of pixels for each organ mask. Defaults to [50, 50].
+        reset_cache (bool, optional): If True, reset the dataset file cache. Defaults to False.
 
     Returns:
         tuple: Tuple of DataLoader objects for train, val, and test splits.
@@ -234,6 +257,7 @@ def create_2d_segmentation_dataloaders(
             min_organs_mask_pixels=min_organ_pixels,
             transforms=train_transform,
             split="train",
+            reset_cache=reset_cache,
         )
         return DataLoader(train_ds, shuffle=True, **common_loader_args)
     elif split == "val":
@@ -243,6 +267,7 @@ def create_2d_segmentation_dataloaders(
             min_organs_mask_pixels=min_organ_pixels,
             transforms=val_transform,
             split="val",
+            reset_cache=reset_cache,
         )
         return DataLoader(val_ds, shuffle=False, **common_loader_args)
     elif split == "test":
@@ -252,6 +277,7 @@ def create_2d_segmentation_dataloaders(
             min_organs_mask_pixels=min_organ_pixels,
             transforms=val_transform,
             split="test",
+            reset_cache=reset_cache,
         )
         return DataLoader(test_ds, shuffle=False, **common_loader_args)
     else:
@@ -261,6 +287,7 @@ def create_2d_segmentation_dataloaders(
             min_organs_mask_pixels=min_organ_pixels,
             transforms=train_transform,
             split="train",
+            reset_cache=reset_cache,
         )
         val_ds = CT2dDataset(
             val_patients,
@@ -268,6 +295,7 @@ def create_2d_segmentation_dataloaders(
             min_organs_mask_pixels=min_organ_pixels,
             transforms=val_transform,
             split="val",
+            reset_cache=reset_cache,
         )
         test_ds = CT2dDataset(
             test_patients,
@@ -275,6 +303,7 @@ def create_2d_segmentation_dataloaders(
             min_organs_mask_pixels=min_organ_pixels,
             transforms=val_transform,
             split="test",
+            reset_cache=reset_cache,
         )
 
         return (
