@@ -6,6 +6,9 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score, recall_score, jaccard_score, precision_score
 
+from ctseg.data import create_2d_segmentation_dataloaders
+from ctseg.models import create_unet_2d_model, create_segresnet_2d_model
+
 
 def evaluate_model(model, test_loader, device, output_dir="evaluation_results", organ_names=None):
     """
@@ -322,3 +325,53 @@ def visualize_samples(dataloader, num_samples=5):
     plt.savefig("kidney_samples_visualization.png")
     plt.close()
     print("Visualization saved as 'kidney_samples_visualization.png'")
+
+
+def inference(args, device):
+    """Run inference on the test set using a trained model.
+
+    Args:
+        args (argparse.Namespace): Parsed command line arguments.
+        device (torch.device): Device to run the model on.
+    """
+
+    print("RUNNING INFERENCE ONLY...")
+    assert args.checkpoint is not None, "Checkpoint path must be provided for inference!"
+
+    if args.model == "segresnet":
+        model = create_segresnet_2d_model(
+            in_channels=1,
+            out_channels=len(args.target_organs),
+            device=device,
+        )
+    elif args.model == "unet":
+        model = create_unet_2d_model(
+            in_channels=1,
+            out_channels=len(args.target_organs),
+            device=device,
+        )
+
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    test_loader = create_2d_segmentation_dataloaders(
+        root_dir=args.dataset,
+        batch_size=args.batch_size,
+        num_patients=args.num_patients,
+        min_organ_pixels=args.min_organ_pixels,
+        target_organs=args.target_organs,
+        split="test",
+        reset_cache=args.reset_cache,
+    )
+
+    # Save predictions in the same directory as the checkpoint
+    checkpoint_path = Path(args.checkpoint)
+    output_dir = checkpoint_path.parent / "eval"
+
+    evaluate_model(
+        model=model,
+        test_loader=test_loader,
+        device=device,
+        output_dir=output_dir,
+        organ_names=args.target_organs,
+    )

@@ -5,6 +5,8 @@ This module contains the training loop for the 2D U-Net model used for kidney se
 It includes functions for training, validation, and visualization of the training process.
 """
 
+import gc
+from pathlib import Path
 from datetime import datetime
 
 import torch
@@ -13,6 +15,10 @@ from torch.optim import Adam
 from monai.losses import DiceCELoss
 from sklearn.metrics import jaccard_score
 from torch.amp import GradScaler, autocast
+
+from ctseg.eval import plot_history, evaluate_model
+from ctseg.data import create_2d_segmentation_dataloaders
+from ctseg.models import create_unet_2d_model, create_segresnet_2d_model
 
 
 def train_2d_model(
@@ -308,3 +314,90 @@ def resume_training_2d(
     )
 
     return model, history
+
+
+def train(args, device):
+    """Interface for training the model.
+
+    Args:
+        args (argparse.Namespace): Parsed command line arguments.
+        device (torch.device): Device to run the model on.
+    """
+    train_loader, val_loader, test_loader = create_2d_segmentation_dataloaders(
+        root_dir=args.dataset,
+        batch_size=args.batch_size,
+        num_patients=args.num_patients,
+        min_organ_pixels=args.min_organ_pixels,
+        target_organs=args.target_organs,
+        reset_cache=args.reset_cache,
+    )
+
+    if args.model == "unet":
+        model = create_unet_2d_model(
+            in_channels=1,
+            out_channels=len(args.target_organs),
+            device=device,
+        )
+    elif args.model == "segresnet":
+        model = create_segresnet_2d_model(
+            in_channels=1,
+            out_channels=len(args.target_organs),
+            device=device,
+        )
+
+    run_name = f"{args.model}{args.mode}_" + args.run_name
+    run_dir = Path("runs") / Path(run_name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.resume:
+        print("=" * 50)
+        print(f"Resuming training from {args.checkpoint}...")
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        torch.save(checkpoint["model_state_dict"], run_dir / "best_model.pth")
+
+        model, history = resume_training_2d(
+            model=model,
+            checkpoint=checkpoint,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device,
+            epochs=args.epochs,
+            lr=args.lr,
+            run_dir=run_dir,
+            weight_decay=args.weight_decay,
+        )
+
+    else:
+        print("=" * 50)
+        print("Training model from scratch...")
+        model, history = train_2d_model(
+            model=model,
+            epochs=args.epochs,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device,
+            lr=args.lr,
+            run_dir=run_dir,
+            weight_decay=args.weight_decay,
+        )
+
+    # Clean up after training
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    plot_history(
+        history=history,
+        run_dir=run_dir,
+    )
+
+    evaluate_model(
+        model=model,
+        test_loader=test_loader,
+        device=device,
+        output_dir=run_dir / "eval",
+        organ_names=args.target_organs,
+    )
+
+    # Clean up after eval
+    torch.cuda.empty_cache()
+    gc.collect()

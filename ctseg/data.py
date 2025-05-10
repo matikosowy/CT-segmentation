@@ -64,9 +64,13 @@ class CT2dDataset(Dataset):
             print(f"Loaded {len(self.samples)} slices from cache.")
             return
         else:
-            print("Cache not found. Loading data...")
-            self._load_data()
-            self._cache_data(cache_path)
+            if reset_cache:
+                print(f"Resetting cache. Deleting '{cache_path}'...")
+                cache_path.unlink(missing_ok=True)
+            else:
+                print(f"Cache for {split} data not found. Loading data...")
+                self._load_data()
+                self._cache_data(cache_path)
 
     def _load_data(self):
         """Load and process CT slices meeting kidney mask criteria."""
@@ -129,7 +133,7 @@ class CT2dDataset(Dataset):
     def _cache_data(self, cache_path):
         """Cache the loaded data to a file."""
         torch.save(self.samples, cache_path)
-        print(f"Data cached to '{cache_path}'.")
+        print(f"Data cached to '{cache_path}'.\n")
 
     def __len__(self):
         return len(self.samples)
