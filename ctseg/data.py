@@ -15,12 +15,13 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 
 
-class Kidneys2dDataset(Dataset):
+class CT2dDataset(Dataset):
     def __init__(
         self,
         patient_dirs,
+        target_organs_names=["kidney_left", "kidney_right"],
+        min_organs_mask_pixels=[50, 50],
         transforms=None,
-        min_kidney_mask_pixels=50,
         split=None,
     ):
         """
@@ -31,16 +32,24 @@ class Kidneys2dDataset(Dataset):
 
         Args:
             patient_dirs (Path): List of directories containing patient data.
+            target_organs_names (list): List of organ names to segment.
+            min_organs_mask_pixels (list): Minimum number of pixels in organ masks.
             transforms: Transformations to apply to the images and masks.
-            min_kidney_mask_pixels (int, optional): Minimum number of pixels in the kidney mask.
-                Defaults to 50.
             split (str, optional): Split type ('train', 'val', 'test'). Defaults to None.
         """
         self.patient_dirs = patient_dirs
+        self.target_organs = target_organs_names
+        self.min_target_masks = min_organs_mask_pixels
         self.transforms = transforms
-        self.min_kidney_mask_pixels = min_kidney_mask_pixels
         self.split = split
         self.samples = []
+
+        if len(self.target_organs) != len(self.min_target_masks):
+            raise ValueError(
+                f"""target_organs and min_organ_pixels must have same length.
+                Got {len(self.target_organs)} and {len(self.min_target_masks)}"""
+            )
+
         self._load_data()
 
     def _load_data(self):
@@ -51,12 +60,19 @@ class Kidneys2dDataset(Dataset):
 
         for patient_dir in tqdm(self.patient_dirs, desc=f"Loading {self.split} patients"):
             image_path = patient_dir / "ct.nii.gz"
-            left_mask_path = patient_dir / "segmentations/kidney_left.nii.gz"
-            right_mask_path = patient_dir / "segmentations/kidney_right.nii.gz"
-
             image = nib.load(image_path).get_fdata()
-            left_mask = nib.load(left_mask_path).get_fdata()
-            right_mask = nib.load(right_mask_path).get_fdata()
+
+            organ_masks = []
+
+            for organ_name in self.target_organs:
+                mask_path = patient_dir / "segmentations" / f"{organ_name}.nii.gz"
+
+                if mask_path.exists():
+                    mask = nib.load(mask_path).get_fdata()
+                    organ_masks.append(mask)
+                else:
+                    print(f"Warning: Mask for {organ_name} not found in {patient_dir}!")
+                    organ_masks.append(np.zeros_like(image))
 
             for slice_idx in range(image.shape[2]):
                 image_slice = image[:, :, slice_idx]
@@ -65,18 +81,25 @@ class Kidneys2dDataset(Dataset):
                 image_slice = np.clip(image_slice, -100, 300)
                 image_slice = (image_slice + 100) / 400
 
-                left_mask_slice = left_mask[:, :, slice_idx]
-                right_mask_slice = right_mask[:, :, slice_idx]
+                mask_slices = []
+                include_slice = False
 
-                combined_mask = np.zeros_like(left_mask_slice)
-                combined_mask[left_mask_slice > 0] = 1
-                combined_mask[right_mask_slice > 0] = 1
+                for i, (organ_mask, min_pixels) in enumerate(zip(organ_masks, self.min_target_masks)):
+                    mask_slice = organ_mask[:, :, slice_idx]
+                    mask_slice = np.clip(mask_slice, 0, 1)
+                    mask_slices.append(mask_slice)
 
-                if np.sum(combined_mask) >= self.min_kidney_mask_pixels:
+                    if np.sum(mask_slice) >= min_pixels:
+                        include_slice = True
+
+                # Only include slice if any organ mask meets the pixel criteria
+                if include_slice:
+                    combined_masks = np.stack(mask_slices, axis=-1).astype(np.float32)
+
                     self.samples.append(
                         {
                             "image": image_slice,
-                            "mask": combined_mask,
+                            "mask": combined_masks,
                             "patient_id": patient_dir.name,
                             "slice_idx": slice_idx,
                         }
@@ -84,7 +107,7 @@ class Kidneys2dDataset(Dataset):
                 else:
                     skipped_slices += 1
 
-        print(f"Skipped {skipped_slices} slices due to small kidney masks.")
+        print(f"Skipped {skipped_slices} slices due to insufficient masks.")
         print(f"{self.split.capitalize()}: Loaded {len(self.samples)} slices from {len(self.patient_dirs)} patients.")
 
     def __len__(self):
@@ -93,38 +116,37 @@ class Kidneys2dDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         image = sample["image"]
-        mask = sample["mask"]
+        masks = sample["mask"]
 
-        image = np.expand_dims(image, axis=-1).astype(np.float32)
-        mask = np.expand_dims(mask, axis=-1).astype(np.float32)
+        image = np.expand_dims(image, axis=-1).astype(np.float32)  # [H, W, 1]
 
         if self.transforms:
-            augmented = self.transforms(image=image, mask=mask)
+            augmented = self.transforms(image=image, mask=masks)
             image = augmented["image"]
-            mask = augmented["mask"]
+            masks = augmented["mask"]
 
-            # Restore original shape if transforms changed it
-            if mask.ndim == 3 and mask.shape[-1] == 1:  # [H, W, C]
-                mask = mask.permute(2, 0, 1)  # [C, H, W]
+            if masks.ndim == 3 and masks.shape[-1] > 1:
+                masks = masks.permute(2, 0, 1)  # [C, H, W]
 
         return {
             "image": image,
-            "mask": mask,
+            "mask": masks,
             "patient_id": sample["patient_id"],
             "slice_idx": sample["slice_idx"],
         }
 
 
-def create_kidney_dataloaders(
+def create_2d_segmentation_dataloaders(
     root_dir,
     batch_size=32,
     val_ratio=0.15,
     test_ratio=0.15,
     num_patients=None,
     seed=42,
-    min_kidney_mask_pixels=50,
     split="full",
     num_workers=4,
+    target_organs=["kidney_left", "kidney_right"],
+    min_organ_pixels=[50, 50],
 ):
     """Creates DataLoader objects for training, validation, and testing of kidney segmentation.
 
@@ -135,13 +157,15 @@ def create_kidney_dataloaders(
         test_ratio (float, optional): Ratio of test set size to total dataset size. Defaults to 0.15.
         num_patients (_type_, optional): Number of patients to use. Defaults to None.
         seed (int, optional): Random seed for reproducibility. Defaults to 42.
-        min_kidney_mask_pixels (int, optional): Minimum number of pixels in kidney mask. Defaults to 50.
         split (str, optional): Split type ('train', 'val', 'test', 'full'). Defaults to "full".
         num_workers (int, optional): Number of workers for DataLoader. Defaults to 4.
+        target_organs (list, optional): List of organs to segment. Defaults to ["kidney_left", "kidney_right"].
+        min_organ_pixels (list, optional): Minimum number of pixels for each organ mask. Defaults to [50, 50].
 
     Returns:
         tuple: Tuple of DataLoader objects for train, val, and test splits.
     """
+    print("=" * 50)
     print("DATA PROCESSING")
 
     root_dir = Path(root_dir)
@@ -150,17 +174,25 @@ def create_kidney_dataloaders(
     rng = np.random.default_rng(seed)
     rng.shuffle(patient_dirs)
 
-    if num_patients:
+    # Split patients
+    if split == "train":
+        train_patients = patient_dirs[:num_patients]
+    elif split == "val":
+        patient_dirs = patient_dirs[200:]
+        val_patients = patient_dirs[:num_patients]
+    elif split == "test":
+        patient_dirs = patient_dirs[300:]
+        test_patients = patient_dirs[:num_patients]
+    else:
         patient_dirs = patient_dirs[:num_patients]
 
-    # Split patients
-    test_size = int(len(patient_dirs) * test_ratio)
-    train_val_patients, test_patients = train_test_split(patient_dirs, test_size=test_size, random_state=seed)
+        test_size = int(len(patient_dirs) * test_ratio)
+        train_val_patients, test_patients = train_test_split(patient_dirs, test_size=test_size, random_state=seed)
 
-    val_size = int(len(train_val_patients) * val_ratio / (1 - test_ratio))
-    val_size = min(val_size, 10)  # Limit to 10 patients for validation (speed up training)
+        val_size = int(len(train_val_patients) * val_ratio / (1 - test_ratio))
+        val_size = min(val_size, 10)  # Limit to 10 patients for validation (speed up training)
 
-    train_patients, val_patients = train_test_split(train_val_patients, test_size=val_size, random_state=seed)
+        train_patients, val_patients = train_test_split(train_val_patients, test_size=val_size, random_state=seed)
 
     train_transform = A.Compose(
         [
@@ -168,9 +200,14 @@ def create_kidney_dataloaders(
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
-            A.ShiftScaleRotate(p=0.3, shift_limit=0.1, scale_limit=0.1, rotate_limit=15),
-            A.GaussNoise(p=0.2),
-            A.GridDistortion(p=0.2),
+            A.Affine(
+                scale=(0.8, 1.2),
+                translate_percent=(-0.1, 0.1),
+                rotate=(-15, 15),
+                p=0.3,
+            ),
+            A.GaussNoise(p=0.2, std_range=(0.01, 0.1)),
+            A.GridDistortion(p=0.2, distort_limit=(-0.1, 0.1)),
             ToTensorV2(),
         ]
     )
@@ -191,47 +228,53 @@ def create_kidney_dataloaders(
     }
 
     if split == "train":
-        train_ds = Kidneys2dDataset(
+        train_ds = CT2dDataset(
             train_patients,
-            train_transform,
+            target_organs_names=target_organs,
+            min_organs_mask_pixels=min_organ_pixels,
+            transforms=train_transform,
             split="train",
-            min_kidney_mask_pixels=min_kidney_mask_pixels,
         )
         return DataLoader(train_ds, shuffle=True, **common_loader_args)
     elif split == "val":
-        val_ds = Kidneys2dDataset(
+        val_ds = CT2dDataset(
             val_patients,
-            val_transform,
+            target_organs_names=target_organs,
+            min_organs_mask_pixels=min_organ_pixels,
+            transforms=val_transform,
             split="val",
-            min_kidney_mask_pixels=min_kidney_mask_pixels,
         )
         return DataLoader(val_ds, shuffle=False, **common_loader_args)
     elif split == "test":
-        test_ds = Kidneys2dDataset(
+        test_ds = CT2dDataset(
             test_patients,
-            val_transform,
+            target_organs_names=target_organs,
+            min_organs_mask_pixels=min_organ_pixels,
+            transforms=val_transform,
             split="test",
-            min_kidney_mask_pixels=min_kidney_mask_pixels,
         )
         return DataLoader(test_ds, shuffle=False, **common_loader_args)
     else:
-        train_ds = Kidneys2dDataset(
+        train_ds = CT2dDataset(
             train_patients,
-            train_transform,
+            target_organs_names=target_organs,
+            min_organs_mask_pixels=min_organ_pixels,
+            transforms=train_transform,
             split="train",
-            min_kidney_mask_pixels=min_kidney_mask_pixels,
         )
-        val_ds = Kidneys2dDataset(
+        val_ds = CT2dDataset(
             val_patients,
-            val_transform,
+            target_organs_names=target_organs,
+            min_organs_mask_pixels=min_organ_pixels,
+            transforms=val_transform,
             split="val",
-            min_kidney_mask_pixels=min_kidney_mask_pixels,
         )
-        test_ds = Kidneys2dDataset(
+        test_ds = CT2dDataset(
             test_patients,
-            val_transform,
+            target_organs_names=target_organs,
+            min_organs_mask_pixels=min_organ_pixels,
+            transforms=val_transform,
             split="test",
-            min_kidney_mask_pixels=min_kidney_mask_pixels,
         )
 
         return (

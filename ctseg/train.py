@@ -30,6 +30,7 @@ def train_unet_2d(
     start_epoch=0,
     best_dice=0.0,
     history=None,
+    organ_weights=None,
 ):
     """
     Train the 2D U-Net model for kidney segmentation.
@@ -51,18 +52,24 @@ def train_unet_2d(
         start_epoch (int, optional): Epoch to start training from. Defaults to 0.
         best_dice (float, optional): Best Dice score achieved so far. Defaults to 0.0.
         history (dict, optional): Dictionary to store training and validation metrics. Defaults to None.
+        organ_weights (torch.tensor): Weights for each organ in the loss function. Defaults to None.
 
     Returns:
         model (nn.Module): Trained model.
         history (dict): Dictionary containing training and validation loss, Dice score, and Jaccard index.
     """
 
+    target_organs = train_loader.dataset.target_organs
+    assert len(organ_weights) == len(target_organs), (
+        f"Organ weights and target organs mismatch, got: " f"{len(organ_weights)} and {len(target_organs)}."
+    )
+
     loss_fn = DiceCELoss(
         to_onehot_y=False,
         sigmoid=True,
-        squared_pred=False,
         include_background=True,
         lambda_ce=0.5,
+        weight=organ_weights,
     )
 
     if optimizer is None:
@@ -99,10 +106,6 @@ def train_unet_2d(
             images = batch["image"].to(device)
             masks = batch["mask"].to(device)
 
-            # Add channel dimension if needed
-            if masks.ndim == 3:
-                masks = masks.unsqueeze(1)
-
             optimizer.zero_grad()
 
             with autocast(device_type="cuda", dtype=torch.float16):
@@ -131,10 +134,6 @@ def train_unet_2d(
                 masks = batch["mask"].to(device)
                 masks_np = masks.cpu().numpy()
 
-                # Add channel dimension if needed
-                if masks.ndim == 3:
-                    masks = masks.unsqueeze(1)
-
                 outputs = model(images)
                 loss = loss_fn(outputs, masks)
 
@@ -143,28 +142,56 @@ def train_unet_2d(
                 preds = torch.sigmoid(outputs)
                 preds_np = (preds > 0.5).float().cpu().numpy()
 
-                dice = 0.0
-                jaccard = 0.0
-                count = 0
+                batch_dice = 0.0
+                batch_jaccard = 0.0
+                batch_count = 0
 
-                for pred, mask in zip(preds_np, masks_np):
-                    # Ensure pred and mask are 2D
-                    if pred.ndim > 2:
-                        pred = pred.squeeze()
+                for sample_idx in range(len(images)):
+                    sample_dice = 0.0
+                    sample_jaccard = 0.0
+                    organ_count = 0
 
-                    if mask.ndim > 2:
-                        mask = mask.squeeze()
+                    if masks_np[sample_idx].ndim > 2:
+                        num_organs = masks_np[sample_idx].shape[0]
 
-                    if mask.sum() > 0:
-                        dice_val = 2 * (pred * mask).sum() / (pred.sum() + mask.sum() + 1e-8)
-                        dice += dice_val
-                        jac_val = jaccard_score(mask.flatten(), pred.flatten())
-                        jaccard += jac_val
-                        count += 1
+                        # For each organ channel
+                        for organ_idx in range(num_organs):
+                            pred = preds_np[sample_idx, organ_idx]
+                            mask = masks_np[sample_idx, organ_idx]
 
-                if count > 0:
-                    epoch_dice += dice / count
-                    epoch_jaccard += jaccard / count
+                            # Only calculate metrics if this organ appears in this slice
+                            if mask.sum() > 0:
+                                dice_val = 2 * (pred * mask).sum() / (pred.sum() + mask.sum() + 1e-8)
+                                sample_dice += dice_val
+
+                                jac_val = jaccard_score(mask.flatten(), pred.flatten(), zero_division=1)
+                                sample_jaccard += jac_val
+
+                                organ_count += 1
+                    else:
+                        # Single channel mask (single organ)
+                        pred = preds_np[sample_idx, 0] if preds_np[sample_idx].ndim > 2 else preds_np[sample_idx]
+                        mask = masks_np[sample_idx]
+
+                        if mask.sum() > 0:
+                            dice_val = 2 * (pred * mask).sum() / (pred.sum() + mask.sum() + 1e-8)
+                            sample_dice += dice_val
+
+                            jac_val = jaccard_score(mask.flatten(), pred.flatten(), zero_division=1)
+                            sample_jaccard += jac_val
+
+                            organ_count += 1
+
+                    # Average metrics across all organs for this sample
+                    if organ_count > 0:
+                        batch_dice += sample_dice / organ_count
+                        batch_jaccard += sample_jaccard / organ_count
+                        batch_count += 1
+
+                # Average metrics across all samples in this batch
+                if batch_count > 0:
+                    epoch_dice += batch_dice / batch_count
+                    epoch_jaccard += batch_jaccard / batch_count
 
         n_train_batches = max(1, len(train_loader))
         n_val_batches = max(1, len(val_loader))
@@ -179,7 +206,7 @@ def train_unet_2d(
         jaccard_scores.append(avg_jaccard)
 
         print(f"\nEpoch {start_epoch+epoch+1}/{start_epoch+epochs} summary: ")
-        print(f"LR: {scheduler.get_last_lr()[0]: .6f}")
+        print(f"LR: {optimizer.param_groups[0]['lr']: .6f}")
         print(f"Train Loss: {avg_train_loss: .4f}")
         print(f"Val Loss: {avg_val_loss: .4f}")
         print(f"Dice Score: {avg_dice: .4f}")
@@ -215,7 +242,7 @@ def train_unet_2d(
                 break
 
         scheduler.step(avg_val_loss)
-        if scheduler.get_last_lr()[0] < 1e-6:
+        if optimizer.param_groups[0]["lr"] < 1e-6:
             print("LR too low, stopping training!\n")
             break
 
@@ -225,11 +252,6 @@ def train_unet_2d(
         "dice_score": dice_scores,
         "jaccard_score": jaccard_scores,
     }
-
-    # Write the best dice score to a .txt file (as a marker/label)
-    file_name = run_dir / f"DICE_{best_dice: .4f}.txt"
-    with open(file_name, "w") as f:
-        f.write("")
 
     print("Training completed!")
     return model, history
@@ -245,6 +267,7 @@ def resume_training_2d(
     lr=1e-4,
     run_dir=datetime.now().strftime("%Y%m%d_%H%M%S"),
     weight_decay=1e-5,
+    organ_weights=None,
 ):
     """
     Resume training from a checkpoint.
@@ -291,6 +314,7 @@ def resume_training_2d(
         start_epoch=start_epoch,
         best_dice=best_dice,
         history=history,
+        organ_weights=organ_weights,
     )
 
     return model, history

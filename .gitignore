@@ -177,11 +177,7 @@ cython_debug/
 CT
 dataset
 runs
-tests
 
 # Files to ignore
-todo.txt
-test.py
 *.csv
 *.pth
-evaluation.py

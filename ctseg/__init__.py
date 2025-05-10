@@ -1,4 +1,4 @@
-__version__ = "0.1.1"
+__version__ = "0.2"
 __author__ = "matikosowy"
 
 __all__ = ["train", "data", "models", "eval"]
