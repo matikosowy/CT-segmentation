@@ -178,6 +178,7 @@ CT
 dataset
 runs
 cache
+.DS_Store
 
 # Files to ignore
 *.csv
