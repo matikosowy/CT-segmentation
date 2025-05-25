@@ -176,9 +176,13 @@ cython_debug/
 # Directories to ignore
 CT
 dataset
+comparison*
+comp*
 runs
 cache
 .DS_Store
+temp*
+test*
 
 # Files to ignore
 *.csv
