@@ -67,6 +67,8 @@ class CT2dDataset(Dataset):
             if reset_cache:
                 print(f"Resetting cache. Deleting '{cache_path}'...")
                 cache_path.unlink(missing_ok=True)
+                self._load_data()
+                self._cache_data(cache_path)
             else:
                 print(f"Cache for {split} data not found. Loading data...")
                 self._load_data()
@@ -224,9 +226,9 @@ def create_2d_segmentation_dataloaders(
     train_transform = A.Compose(
         [
             A.Resize(256, 256),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            A.RandomRotate90(p=0.5),
+            # A.HorizontalFlip(p=0.5),
+            # A.VerticalFlip(p=0.5),
+            # A.RandomRotate90(p=0.5),
             A.Affine(
                 scale=(0.8, 1.2),
                 translate_percent=(-0.1, 0.1),
