@@ -8,9 +8,10 @@ import torch
 from monai.networks.nets import UNet, SegResNet
 
 
-def create_unet_2d_model(
-    in_channels=1,
-    out_channels=2,
+def create_unet_model(
+    in_channels,
+    out_channels,
+    dims=2,
     channels=(64, 128, 256, 512),
     strides=(2, 2, 2),
     num_res_units=2,
@@ -24,6 +25,13 @@ def create_unet_2d_model(
     Args:
         in_channels (int): Number of input channels.
         out_channels (int): Number of output channels (classes).
+        dims (int): Spatial dimensions (2 for 2D, 3 for 3D).
+        device (str or torch.device): Device to place the model on.
+        channels (tuple): Number of channels at each level.
+        strides (tuple): Strides for downsampling.
+        num_res_units (int): Number of residual units in each block.
+        norm (str): Normalization type ('batch', 'instance').
+        dropout (float): Dropout probability.
         device (str or torch.device): Device to place the model on.
 
     Returns:
@@ -33,7 +41,7 @@ def create_unet_2d_model(
     print("Creating 2D UNet model...")
 
     model = UNet(
-        spatial_dims=2,
+        spatial_dims=dims,
         in_channels=in_channels,
         out_channels=out_channels,
         channels=channels,
@@ -58,9 +66,10 @@ def create_unet_2d_model(
     return model
 
 
-def create_segresnet_2d_model(
-    in_channels=1,
-    out_channels=1,
+def create_segresnet_model(
+    in_channels,
+    out_channels,
+    dims,
     device="cuda",
     init_filters=32,
     use_conv_final=True,
@@ -74,6 +83,7 @@ def create_segresnet_2d_model(
     Args:
         in_channels (int): Number of input channels.
         out_channels (int): Number of output channels (classes).
+        dims (int): Spatial dimensions (2 for 2D, 3 for 3D).
         device (str or torch.device): Device to place the model on.
         init_filters (int): Number of initial filters.
         use_conv_final (bool): Whether to use final convolution layer.
@@ -88,7 +98,7 @@ def create_segresnet_2d_model(
     print("Creating 2D SegResNet model...")
 
     model = SegResNet(
-        spatial_dims=2,
+        spatial_dims=dims,
         in_channels=in_channels,
         out_channels=out_channels,
         init_filters=init_filters,

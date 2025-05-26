@@ -17,8 +17,8 @@ from sklearn.metrics import jaccard_score
 from torch.amp import GradScaler, autocast
 
 from ctseg.eval import plot_history, evaluate_model
-from ctseg.data import create_2d_segmentation_dataloaders
-from ctseg.models import create_unet_2d_model, create_segresnet_2d_model
+from ctseg.models import create_unet_model, create_segresnet_model
+from ctseg.data import create_2d_segmentation_dataloaders, create_3d_segmentation_dataloaders
 
 
 def train_2d_model(
@@ -317,7 +317,7 @@ def resume_training_2d(
 
 
 def train(args, device):
-    """Interface for training the model.
+    """Main training wrapper for 2D segmentation.
 
     Args:
         args (argparse.Namespace): Parsed command line arguments.
@@ -333,16 +333,20 @@ def train(args, device):
     )
 
     if args.model == "unet":
-        model = create_unet_2d_model(
+        model = create_unet_model(
             in_channels=1,
             out_channels=len(args.target_organs),
             device=device,
+            channels=args.unet_channels,
+            dropout=args.unet_dropout,
+            num_res_units=args.unet_units,
         )
     elif args.model == "segresnet":
-        model = create_segresnet_2d_model(
+        model = create_segresnet_model(
             in_channels=1,
             out_channels=len(args.target_organs),
             device=device,
+            init_filters=args.segresnet_filters,
         )
 
     run_name = f"{args.model}{args.mode}_" + args.run_name
@@ -396,6 +400,110 @@ def train(args, device):
         device=device,
         output_dir=run_dir / "eval",
         organ_names=args.target_organs,
+    )
+
+    # Clean up after eval
+    torch.cuda.empty_cache()
+    gc.collect()
+
+
+def train_3d_model():
+    ...
+
+
+def resume_training_3d():
+    ...
+
+
+def train_3d(args, device):
+    """Main training wrapper for 3D segmentation.
+
+    Args:
+        args (argparse.Namespace): Parsed command line arguments.
+        device (torch.device): Device to run the model on.
+    """
+    train_loader, val_loader, test_loader = create_3d_segmentation_dataloaders(
+        root_dir=args.dataset,
+        batch_size=args.batch_size,
+        num_patients=args.num_patients,
+        min_organ_pixels=args.min_organ_pixels,
+        target_organs=args.target_organs,
+        reset_cache=args.reset_cache,
+        height=args.height,
+    )
+
+    if args.model == "unet":
+        model = create_unet_model(
+            dims=3,  # dims? in/out channels?
+            in_channels=1,
+            out_channels=len(args.target_organs),
+            device=device,
+            channels=args.unet_channels,
+            dropout=args.unet_dropout,
+            num_res_units=args.unet_units,
+        )
+    elif args.model == "segresnet":
+        model = create_segresnet_model(
+            dims=3,  # dims? in/out channels?
+            in_channels=1,
+            out_channels=len(args.target_organs),
+            device=device,
+            init_filters=args.segresnet_filters,
+        )
+
+    run_name = f"{args.model}{args.mode}_" + args.run_name
+    run_dir = Path("runs") / Path(run_name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.resume:
+        print("=" * 50)
+        print(f"Resuming training from {args.checkpoint}...")
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        torch.save(checkpoint["model_state_dict"], run_dir / "best_model.pth")
+
+        model, history = resume_training_3d(
+            model=model,
+            checkpoint=checkpoint,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device,
+            epochs=args.epochs,
+            lr=args.lr,
+            run_dir=run_dir,
+            weight_decay=args.weight_decay,
+        )
+
+    else:
+        print("=" * 50)
+        print("Training model from scratch...")
+        model, history = train_3d_model(
+            model=model,
+            epochs=args.epochs,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device,
+            lr=args.lr,
+            run_dir=run_dir,
+            weight_decay=args.weight_decay,
+        )
+
+    # Clean up after training
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    plot_history(
+        history=history,
+        run_dir=run_dir,
+    )
+
+    evaluate_model(
+        model=model,
+        test_loader=test_loader,
+        device=device,
+        output_dir=run_dir / "eval",
+        organ_names=args.target_organs,
+        mode="3d",
+        height=args.height,
     )
 
     # Clean up after eval

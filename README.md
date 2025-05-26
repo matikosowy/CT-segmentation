@@ -111,4 +111,3 @@ Training and evaluation results are saved in the `runs/[experiment_name]` direct
 - `eval/`: directory with evaluation results, including:
   - Segmentation visualizations on the test set
   - `evaluation_metrics.txt` file with detailed metrics for each organ
-

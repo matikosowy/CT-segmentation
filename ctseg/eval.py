@@ -10,7 +10,15 @@ from ctseg.data import create_2d_segmentation_dataloaders
 from ctseg.models import create_unet_2d_model, create_segresnet_2d_model
 
 
-def evaluate_model(model, test_loader, device, output_dir="evaluation_results", organ_names=None):
+def evaluate_model(
+    model,
+    test_loader,
+    device,
+    output_dir="evaluation_results",
+    organ_names=None,
+    mode="2d",
+    height=None,
+):
     """
     Evaluate the model on the test set, print metrics and save visualization results.
 
@@ -20,6 +28,8 @@ def evaluate_model(model, test_loader, device, output_dir="evaluation_results", 
         device: Device to run inference on
         output_dir: Directory to save results
         organ_names: List of organ names corresponding to mask channels
+        mode: "2d" or "3d" - determines how the model processes the data
+        height: Height of the input images (for 3D mode, not used in 2D)
     """
     print("=" * 30)
     print("EVALUATION - please wait... (0% for a while is normal)")
