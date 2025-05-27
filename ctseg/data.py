@@ -11,6 +11,7 @@ import numpy as np
 import nibabel as nib
 from tqdm import tqdm
 import albumentations as A
+import monai.transforms as transforms_3d
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
@@ -541,9 +542,27 @@ def create_3d_segmentation_dataloaders(
 
         train_patients, val_patients = train_test_split(train_val_patients, test_size=val_size, random_state=seed)
 
-    train_transform = None  # monai
+    train_transform = transforms_3d.Compose(
+        [
+            transforms_3d.Resize((height, 256, 256)),
+            transforms_3d.RandAffined(
+                prob=0.3,
+                rotate_range=(-15, 15),
+                scale_range=(0.8, 1.2),
+                translate_range=(-0.1, 0.1),
+            ),
+            transforms_3d.GaussianNoise(prob=0.2, std=(0.01, 0.1)),
+            transforms_3d.GridDistortion(prob=0.2, distort_limit=(-0.1, 0.1)),
+            transforms_3d.ToTensor(),
+        ]
+    )
 
-    val_transform = None  # monai
+    val_transform = transforms_3d.Compose(
+        [
+            transforms_3d.Resize((height, 256, 256)),
+            transforms_3d.ToTensor(),
+        ]
+    )
 
     common_loader_args = {
         "batch_size": batch_size,

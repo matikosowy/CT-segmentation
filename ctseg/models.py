@@ -9,9 +9,9 @@ from monai.networks.nets import UNet, SegResNet
 
 
 def create_unet_model(
-    in_channels,
     out_channels,
-    dims=2,
+    dims,
+    in_channels=1,
     channels=(64, 128, 256, 512),
     strides=(2, 2, 2),
     num_res_units=2,
@@ -38,7 +38,7 @@ def create_unet_model(
         nn.Module: UNet 2D model.
     """
     print("=" * 50)
-    print("Creating 2D UNet model...")
+    print(f"Creating {dims}D UNet model...")
 
     model = UNet(
         spatial_dims=dims,
@@ -53,11 +53,11 @@ def create_unet_model(
 
     # Init weights - He
     for m in model.modules():
-        if isinstance(m, torch.nn.Conv2d):
+        if isinstance(m, torch.nn.Conv2d, torch.nn.Conv3d):
             torch.nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             if m.bias is not None:
                 torch.nn.init.zeros_(m.bias)
-        elif isinstance(m, torch.nn.BatchNorm2d):
+        elif isinstance(m, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d):
             torch.nn.init.ones_(m.weight)
             torch.nn.init.zeros_(m.bias)
 
@@ -67,9 +67,9 @@ def create_unet_model(
 
 
 def create_segresnet_model(
-    in_channels,
     out_channels,
     dims,
+    in_channels=1,
     device="cuda",
     init_filters=32,
     use_conv_final=True,
@@ -95,7 +95,7 @@ def create_segresnet_model(
         nn.Module: SegResNet model.
     """
     print("=" * 50)
-    print("Creating 2D SegResNet model...")
+    print(f"Creating {dims}D SegResNet model...")
 
     model = SegResNet(
         spatial_dims=dims,
@@ -110,11 +110,11 @@ def create_segresnet_model(
 
     # Init weights - Kaiming He
     for m in model.modules():
-        if isinstance(m, torch.nn.Conv2d):
+        if isinstance(m, torch.nn.Conv2d, torch.nn.Conv3d):
             torch.nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             if m.bias is not None:
                 torch.nn.init.zeros_(m.bias)
-        elif isinstance(m, torch.nn.BatchNorm2d):
+        elif isinstance(m, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d):
             torch.nn.init.ones_(m.weight)
             torch.nn.init.zeros_(m.bias)
 

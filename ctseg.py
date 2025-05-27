@@ -2,11 +2,6 @@
 Main script for CT segmentation project.
 """
 
-# todo:
-# - train.py 3d support
-# - eval.py 3d support
-# - data.py (monai augmentations)
-
 import gc
 
 import torch
