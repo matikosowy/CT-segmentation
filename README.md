@@ -20,7 +20,7 @@ The project focuses on a 2D segmentation approach, processing CT images slice-by
 - **Training**: Uses DiceCELoss, Adam optimizer, and automatic early stopping
 - **Evaluation**: Calculation of segmentation metrics for each organ and visualization of results
 
-3D segmentation approach in progress.
+But 3D mode is also supported, allowing for volumetric segmentation. To use it, set the `--mode` parameter to `3d` when running the script.
 
 ## Installation
 
@@ -111,4 +111,3 @@ Training and evaluation results are saved in the `runs/[experiment_name]` direct
 - `eval/`: directory with evaluation results, including:
   - Segmentation visualizations on the test set
   - `evaluation_metrics.txt` file with detailed metrics for each organ
-

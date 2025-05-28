@@ -100,6 +100,32 @@ def parse_args():
         default=1e-4,
         help="Weight decay for optimizer",
     )
+    parser.add_argument(
+        "--unet_channels",
+        nargs="+",
+        type=int,
+        default=[64, 128, 256, 512],
+        help="Number of channels for each layer in UNet architecture",
+    )
+    parser.add_argument(
+        "--unet_dropout",
+        type=float,
+        default=0.2,
+        help="Dropout rate for UNet architecture",
+    )
+    parser.add_argument("--unet_units", type=int, default=2, help="Number of ResUnits")
+    parser.add_argument(
+        "--segresnet_filters",
+        type=int,
+        default=32,
+        help="Number of initial filters for SegResNet architecture",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=8,
+        help="Height of the input images (for 3D mode)",
+    )
 
     args = parser.parse_args()
 

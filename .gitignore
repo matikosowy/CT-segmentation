@@ -183,6 +183,7 @@ cache
 .DS_Store
 temp*
 test*
+.vscode
 
 # Files to ignore
 *.csv
