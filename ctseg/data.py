@@ -227,9 +227,6 @@ def create_2d_segmentation_dataloaders(
     train_transform = A.Compose(
         [
             A.Resize(256, 256),
-            # A.HorizontalFlip(p=0.5),
-            # A.VerticalFlip(p=0.5),
-            # A.RandomRotate90(p=0.5),
             A.Affine(
                 scale=(0.8, 1.2),
                 translate_percent=(-0.1, 0.1),
@@ -366,7 +363,7 @@ class CT3dDataset(Dataset):
         if cache_path.exists() and not reset_cache:
             print(f"Loading cached {split} data from '{cache_path}'...")
             self.samples = torch.load(cache_path)
-            print(f"Loaded {len(self.samples)} slices from cache.")
+            print(f"Loaded {len(self.samples)} volumes from cache.")
             return
         else:
             if reset_cache:
@@ -446,7 +443,7 @@ class CT3dDataset(Dataset):
                 )
 
         print(f"Skipped {skipped_volumes} volumes due to insufficient masks.")
-        print(f"{self.split.capitalize()}: Loaded {len(self.samples)} slices from {len(self.patient_dirs)} patients.")
+        print(f"{self.split.capitalize()}: Loaded {len(self.samples)} volumes from {len(self.patient_dirs)} patients.")
 
     def _cache_data(self, cache_path):
         """Cache the loaded data to a file."""
@@ -461,16 +458,20 @@ class CT3dDataset(Dataset):
         image = sample["image"]
         masks = sample["mask"]
 
-        image = np.expand_dims(image, axis=-1).astype(np.float32)  # [H, W, D, 1]
+        # Transpose to get [D, H, W] format
+        image = np.transpose(image, (2, 0, 1)).astype(np.float32)  # [D, H, W]
+        # Add channel dimension: [1, D, H, W]
+        image = np.expand_dims(image, axis=0)
+
+        # Transpose from [H, W, D, C] to [C, D, H, W]
+        masks = np.transpose(masks, (3, 2, 0, 1)).astype(np.float32)
 
         if self.transforms:
-            # Monai transforms for 3d
-            augmented = self.transforms(image=image, mask=masks)
+            # Prepare data as a dictionary for Monai transforms
+            data = {"image": image, "mask": masks}
+            augmented = self.transforms(data)
             image = augmented["image"]
             masks = augmented["mask"]
-
-            if masks.ndim == 4 and masks.shape[-1] > 1:
-                masks = masks.permute(3, 0, 1, 2)  # [C, H, W, D]
 
         return {
             "image": image,
@@ -490,7 +491,7 @@ def create_3d_segmentation_dataloaders(
     split="full",
     num_workers=4,
     target_organs=["kidney_left", "kidney_right"],
-    min_organ_pixels=[200, 200],
+    min_organ_pixels=[1000, 1000],
     reset_cache=False,
     height=8,
 ):
@@ -544,23 +545,41 @@ def create_3d_segmentation_dataloaders(
 
     train_transform = transforms_3d.Compose(
         [
-            transforms_3d.Resize((height, 256, 256)),
-            transforms_3d.RandAffined(
-                prob=0.3,
-                rotate_range=(-15, 15),
-                scale_range=(0.8, 1.2),
-                translate_range=(-0.1, 0.1),
+            transforms_3d.ResizeD(
+                keys=["image", "mask"],
+                spatial_size=(height, 256, 256),
+                mode=("bilinear", "nearest"),
             ),
-            transforms_3d.GaussianNoise(prob=0.2, std=(0.01, 0.1)),
-            transforms_3d.GridDistortion(prob=0.2, distort_limit=(-0.1, 0.1)),
-            transforms_3d.ToTensor(),
+            transforms_3d.RandGaussianNoiseD(
+                keys=["image"],
+                prob=0.2,
+                mean=0.0,
+                std=0.1,
+            ),
+            transforms_3d.RandAffineD(
+                keys=["image", "mask"],
+                prob=0.3,
+                rotate_range=(0, 0, 15),
+                scale_range=(0.8, 1.2),
+                translate_range=(0.1, 0.1, 0.1),
+            ),
+            transforms_3d.RandGridDistortionD(
+                keys=["image", "mask"],
+                prob=0.2,
+                distort_limit=(-0.1, 0.1),
+            ),
+            transforms_3d.ToTensorD(keys=["image", "mask"]),
         ]
     )
 
     val_transform = transforms_3d.Compose(
         [
-            transforms_3d.Resize((height, 256, 256)),
-            transforms_3d.ToTensor(),
+            transforms_3d.ResizeD(
+                keys=["image", "mask"],
+                spatial_size=(height, 256, 256),
+                mode=("bilinear", "nearest"),
+            ),
+            transforms_3d.ToTensorD(keys=["image", "mask"]),
         ]
     )
 

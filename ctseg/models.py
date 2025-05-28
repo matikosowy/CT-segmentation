@@ -53,11 +53,11 @@ def create_unet_model(
 
     # Init weights - He
     for m in model.modules():
-        if isinstance(m, torch.nn.Conv2d, torch.nn.Conv3d):
+        if isinstance(m, (torch.nn.Conv2d, torch.nn.Conv3d)):
             torch.nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             if m.bias is not None:
                 torch.nn.init.zeros_(m.bias)
-        elif isinstance(m, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d):
+        elif isinstance(m, (torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
             torch.nn.init.ones_(m.weight)
             torch.nn.init.zeros_(m.bias)
 
@@ -71,9 +71,9 @@ def create_segresnet_model(
     dims,
     in_channels=1,
     device="cuda",
-    init_filters=32,
+    init_filters=16,
     use_conv_final=True,
-    blocks_down=(1, 2, 2, 4),
+    blocks_down=(1, 1, 1, 2),
     blocks_up=(1, 1, 1),
     dropout_prob=0.2,
 ):
@@ -110,11 +110,11 @@ def create_segresnet_model(
 
     # Init weights - Kaiming He
     for m in model.modules():
-        if isinstance(m, torch.nn.Conv2d, torch.nn.Conv3d):
+        if isinstance(m, (torch.nn.Conv2d, torch.nn.Conv3d)):
             torch.nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             if m.bias is not None:
                 torch.nn.init.zeros_(m.bias)
-        elif isinstance(m, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d):
+        elif isinstance(m, (torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
             torch.nn.init.ones_(m.weight)
             torch.nn.init.zeros_(m.bias)
 

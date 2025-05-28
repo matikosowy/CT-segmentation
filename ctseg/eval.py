@@ -276,17 +276,11 @@ def evaluate_3d_model(
             inputs = batch["image"].to(device)
             labels = batch["mask"].to(device)
 
-            if inputs.dim() == 5 and inputs.size(1) == 1:  # [B, 1, H, W, D]
-                inputs = inputs.squeeze(1)  # [B, H, W, D]
-
-            if labels.dim() == 5 and labels.size(1) == 1:  # [B, 1, H, W, D]
-                labels = labels.squeeze(1)  # [B, H, W, D]
-
             # Determine number of organs
             if num_organs is None:
-                if labels.dim() == 5:  # [B, C, H, W, D]
+                if labels.dim() == 5:  # [B, C, D, H, W]
                     num_organs = labels.size(1)
-                elif labels.dim() == 4:  # [B, H, W, D] - single organ
+                elif labels.dim() == 4:  # [B, D, H, W] - single organ
                     num_organs = 1
                 else:
                     raise ValueError(f"Unexpected labels dimension: {labels.dim()}")
@@ -313,7 +307,7 @@ def evaluate_3d_model(
                 # For each organ channel
                 for o in range(num_organs):
                     # Extract the appropriate mask for this organ
-                    if labels.dim() == 5:  # [B, C, H, W, D]
+                    if labels.dim() == 5:  # [B, C, D, H, W]
                         pred = preds_np[j, o]
                         label = labels_np[j, o]
                     elif outputs.dim() == 5 and labels.dim() == 4:  # multi-output, single-label
@@ -351,16 +345,16 @@ def evaluate_3d_model(
             if i % 5 == 0:
                 for j in range(min(1, inputs.shape[0])):
                     if height is None:
-                        slice_idx = inputs_np.shape[-1] // 2  # Middle slice
+                        slice_idx = inputs_np.shape[2] // 2  # Middle slice for [B, C, D, H, W]
                         slices_to_show = [slice_idx]
                     else:
                         # Show beginning, middle and end slices
                         slices_to_show = [0, height // 2, height - 1]
-                        slices_to_show = [s for s in slices_to_show if s < inputs_np.shape[-1]]
+                        slices_to_show = [s for s in slices_to_show if s < inputs_np.shape[2]]
 
                     for slice_idx in slices_to_show:
-                        if inputs_np.ndim == 4:  # [B, H, W, D]
-                            input_slice = inputs_np[j, :, :, slice_idx]
+                        # Extract the 2D slice from 3D volume [B, C, D, H, W]
+                        input_slice = inputs_np[j, 0, slice_idx]
 
                         fig, axes = plt.subplots(1, 2, figsize=(12, 6))
 
@@ -379,10 +373,10 @@ def evaluate_3d_model(
                             # Add colored overlays for each organ
                             for o in range(num_organs):
                                 mask = None
-                                if data_source.ndim == 5:  # [B, C, H, W, D]
-                                    mask = data_source[j, o, :, :, slice_idx]
-                                elif data_source.ndim == 4 and num_organs == 1:  # [B, H, W, D]
-                                    mask = data_source[j, :, :, slice_idx]
+                                if data_source.ndim == 5:  # [B, C, D, H, W]
+                                    mask = data_source[j, o, slice_idx]
+                                elif data_source.ndim == 4 and num_organs == 1:  # [B, D, H, W]
+                                    mask = data_source[j, slice_idx]
 
                                 if mask is None:
                                     continue
@@ -425,7 +419,6 @@ def evaluate_3d_model(
     overall_precision = []
     overall_recall = []
     overall_f1 = []
-    samples_evaluated = 0
 
     # Print metrics for each organ
     print("\n===== 3D Evaluation Metrics =====")
@@ -452,7 +445,6 @@ def evaluate_3d_model(
         overall_precision.extend(organ_metrics[o]["precision_scores"])
         overall_recall.extend(organ_metrics[o]["recall_scores"])
         overall_f1.extend(organ_metrics[o]["f1_scores"])
-        samples_evaluated += organ_samples
 
     # Calculate overall metrics
     avg_metrics = {
@@ -475,7 +467,7 @@ def evaluate_3d_model(
     print("=============================\n")
 
     # Save metrics to file
-    metrics_file = output_dir / "evaluation_metrics_3d.txt"
+    metrics_file = output_dir / "evaluation_metrics.txt"
     with open(metrics_file, "w") as f:
         f.write("===== 3D Evaluation Metrics =====\n")
         for o in range(num_organs):
@@ -694,7 +686,7 @@ def inference_3d(args, device):
     )
 
     checkpoint_path = Path(args.checkpoint)
-    output_dir = checkpoint_path.parent / "eval_3d"
+    output_dir = checkpoint_path.parent / "eval"
 
     evaluate_3d_model(
         model=model,

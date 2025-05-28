@@ -16,8 +16,8 @@ from monai.losses import DiceCELoss
 from sklearn.metrics import jaccard_score
 from torch.amp import GradScaler, autocast
 
-from ctseg.eval import plot_history, evaluate_model
 from ctseg.models import create_unet_model, create_segresnet_model
+from ctseg.eval import plot_history, evaluate_model, evaluate_3d_model
 from ctseg.data import create_2d_segmentation_dataloaders, create_3d_segmentation_dataloaders
 
 
@@ -489,12 +489,6 @@ def train_3d_model(
             images = batch["image"].to(device)
             masks = batch["mask"].to(device)
 
-            if images.dim() == 5 and images.size(1) == 1:  # [B, 1, H, W, D]
-                images = images.squeeze(1)  # [B, H, W, D]
-
-            if masks.dim() == 5 and masks.size(1) == 1:  # [B, 1, H, W, D]
-                masks = masks.squeeze(1)  # [B, H, W, D]
-
             optimizer.zero_grad()
 
             with autocast(device_type="cuda", dtype=torch.float16):
@@ -524,12 +518,6 @@ def train_3d_model(
             for batch in val_progress:
                 images = batch["image"].to(device)
                 masks = batch["mask"].to(device)
-
-                if images.dim() == 5 and images.size(1) == 1:
-                    images = images.squeeze(1)
-
-                if masks.dim() == 5 and masks.size(1) == 1:
-                    masks = masks.squeeze(1)
 
                 masks_np = masks.cpu().numpy()
 
@@ -784,13 +772,12 @@ def train_3d(args, device):
         run_dir=run_dir,
     )
 
-    evaluate_model(
+    evaluate_3d_model(
         model=model,
         test_loader=test_loader,
         device=device,
         output_dir=run_dir / "eval",
         organ_names=args.target_organs,
-        mode="3d",
         height=args.height,
     )
 
