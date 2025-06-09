@@ -178,7 +178,7 @@ CT
 dataset
 comparison*
 comp*
-runs
+runs/*.pth
 cache
 .DS_Store
 temp*

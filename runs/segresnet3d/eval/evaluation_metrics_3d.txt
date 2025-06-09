@@ -1,0 +1,37 @@
+===== 3D Evaluation Metrics =====
+
+kidney_right:
+  Dice Score:  0.8833
+  Jaccard Index (IoU):  0.8192
+  Precision:  0.8715
+  Recall:  0.9329
+  F1 Score:  0.8833
+
+kidney_left:
+  Dice Score:  0.8906
+  Jaccard Index (IoU):  0.8369
+  Precision:  0.9042
+  Recall:  0.9035
+  F1 Score:  0.8906
+
+adrenal_gland_right:
+  Dice Score:  0.5290
+  Jaccard Index (IoU):  0.4038
+  Precision:  0.6336
+  Recall:  0.5704
+  F1 Score:  0.5290
+
+adrenal_gland_left:
+  Dice Score:  0.5745
+  Jaccard Index (IoU):  0.4559
+  Precision:  0.6739
+  Recall:  0.5998
+  F1 Score:  0.5745
+
+Overall 3D Results:
+Dice Score:  0.7804
+Jaccard Index (IoU):  0.7015
+Precision:  0.8136
+Recall:  0.8121
+F1 Score:  0.7804
+Volumes evaluated: 483

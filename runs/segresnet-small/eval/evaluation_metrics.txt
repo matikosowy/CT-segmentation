@@ -1,0 +1,37 @@
+===== Evaluation Metrics =====
+
+kidney_right:
+  Dice Score:  0.7440
+  Jaccard Index (IoU):  0.6726
+  Precision:  0.7617
+  Recall:  0.7742
+  F1 Score:  0.7440
+
+kidney_left:
+  Dice Score:  0.7605
+  Jaccard Index (IoU):  0.6854
+  Precision:  0.7657
+  Recall:  0.7832
+  F1 Score:  0.7605
+
+adrenal_gland_right:
+  Dice Score:  0.5375
+  Jaccard Index (IoU):  0.4039
+  Precision:  0.5210
+  Recall:  0.6605
+  F1 Score:  0.5375
+
+adrenal_gland_left:
+  Dice Score:  0.4369
+  Jaccard Index (IoU):  0.3173
+  Precision:  0.4963
+  Recall:  0.5577
+  F1 Score:  0.4369
+
+Overall:
+Dice Score:  0.6814
+Jaccard Index (IoU):  0.5941
+Precision:  0.6961
+Recall:  0.7330
+F1 Score:  0.6814
+Samples evaluated: 3483
